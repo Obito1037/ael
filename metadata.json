@@ -1,0 +1,6 @@
+{
+  "name": "AEL Agent Experience Ledger",
+  "description": "A high-precision developer tool for managing AI agent task lifecycles, skill libraries, evidence timelines, and automated failure defense rules.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
