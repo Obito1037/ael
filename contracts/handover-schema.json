@@ -1,0 +1,88 @@
+{
+  "$comment": "handover.zip 内 manifest.json 结构 · FROZEN v1。改字段必须 bump schema_version。",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AEL Handover Manifest",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "task", "events", "handover_prompt"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1, "description": "破坏性改动时递增" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "generated_by": { "type": "string", "description": "导出时的 agent_id" },
+    "ael_version": { "type": "string", "description": "导出端 AEL 应用版本" },
+
+    "task": {
+      "type": "object",
+      "required": ["id", "title", "goal", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "goal": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "in_progress", "blocked", "verified", "failed", "abandoned"]
+        },
+        "agent_id": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "repo_state": {
+          "type": "object",
+          "description": "代码任务的仓库状态,接手者据此对齐工作树",
+          "properties": {
+            "path": { "type": "string" },
+            "branch": { "type": "string" },
+            "commit": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "events": {
+      "type": "array",
+      "description": "完整证据链,按 seq 升序",
+      "items": {
+        "type": "object",
+        "required": ["seq", "kind", "summary"],
+        "properties": {
+          "seq": { "type": "integer" },
+          "kind": {
+            "type": "string",
+            "enum": ["step", "error", "fix", "verification", "decision", "note"]
+          },
+          "summary": { "type": "string" },
+          "detail": { "type": "string" },
+          "evidence_ref": {
+            "type": "string",
+            "description": "指向 zip 内 evidence/ 的相对路径,或外部绝对路径"
+          }
+        }
+      }
+    },
+
+    "relevant_skills": {
+      "type": "array",
+      "description": "接手者应知道的 Skill(结构同 skill-schema.json)",
+      "items": { "type": "object" }
+    },
+    "relevant_failures": {
+      "type": "array",
+      "description": "本任务踩过或需规避的失败模式",
+      "items": { "type": "object" }
+    },
+    "open_questions": {
+      "type": "array",
+      "description": "交接时尚未解决的问题",
+      "items": { "type": "string" }
+    },
+
+    "handover_prompt": {
+      "type": "string",
+      "description": "生成好的接手 Prompt——接手 Agent 读完即可继续,无需人工重新解释上下文"
+    }
+  },
+
+  "$zip_layout": {
+    "manifest.json": "本结构",
+    "handover_prompt.md": "handover_prompt 的独立可读副本",
+    "evidence/": "证据文件(日志/截图/diff),被 events[].evidence_ref 引用"
+  }
+}
