@@ -126,5 +126,77 @@ lock_left = cur.execute("SELECT COUNT(*) FROM workspace_locks WHERE owner_sessio
 print(f"[12] agent runtime cascade: sessions_left={session_left} chunks_left={chunk_left} locks_left={lock_left}")
 assert session_left == 0 and chunk_left == 0 and lock_left == 0
 
+# 13) v4 治理层:actor 默认值 + CHECK
+cur.execute("INSERT INTO tasks(id,title,goal,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            ("tg","Gov task","governance","in_progress",ts,ts))
+cur.execute("INSERT INTO task_events(id,task_id,seq,kind,summary,created_at) VALUES (?,?,?,?,?,?)",
+            ("eg1","tg",1,"decision","链接器探测下沉到 build.rs",ts))
+actor = cur.execute("SELECT actor FROM task_events WHERE id='eg1'").fetchone()[0]
+assert actor == "ai", f"actor default wrong: {actor}"
+cur.execute("""INSERT INTO task_events(id,task_id,seq,kind,summary,actor,session_id,anchor_file,anchor_lines,created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            ("eg2","tg",2,"fix","vcvars 注入","human",None,"src/build.rs","12-40",ts))
+try:
+    cur.execute("INSERT INTO task_events(id,task_id,seq,kind,summary,actor,created_at) VALUES (?,?,?,?,?,?,?)",
+                ("eg3","tg",3,"note","bad actor","robot",ts))
+    print("[13] FAILED: bad actor allowed"); sys.exit(1)
+except sqlite3.IntegrityError:
+    print("[13] task_events.actor default + CHECK: OK")
+
+# 14) skills 保鲜期字段
+cur.execute("""INSERT INTO skills(id,name,trigger_text,body,origin_agent,origin_model,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            ("sg1","gov skill","trigger","body","claude_code","opus-4.8",ts,ts))
+fresh = cur.execute("SELECT freshness FROM skills WHERE id='sg1'").fetchone()[0]
+assert fresh == "fresh"
+cur.execute("UPDATE skills SET freshness='needs_revalidation' WHERE id='sg1'")
+try:
+    cur.execute("UPDATE skills SET freshness='rotten' WHERE id='sg1'")
+    print("[14] FAILED: bad freshness allowed"); sys.exit(1)
+except sqlite3.IntegrityError:
+    print("[14] skills.freshness default + CHECK: OK")
+
+# 15) policy_decisions 账本
+cur.execute("""INSERT INTO policy_decisions(id,task_id,rule_id,action,verdict,command_text,reason,decided_by,created_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            ("pd1","tg","destructive_fs","hold","denied","rm -rf ~/repo","破坏性删除","human",ts))
+try:
+    cur.execute("""INSERT INTO policy_decisions(id,rule_id,action,verdict,command_text,reason,decided_by,created_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                ("pd2","x","escalate","denied","cmd","r","policy",ts))
+    print("[15] FAILED: bad action allowed"); sys.exit(1)
+except sqlite3.IntegrityError:
+    print("[15] policy_decisions insert + CHECK(action): OK")
+
+# 16) adrs 编号唯一
+cur.execute("""INSERT INTO adrs(id,task_id,number,title,status,context,decision,created_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            ("adr1","tg",1,"链接器探测下沉","accepted","Windows 构建失败","探测逻辑放 build.rs",ts))
+try:
+    cur.execute("""INSERT INTO adrs(id,number,title,status,context,decision,created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                ("adr2",1,"dup","accepted","c","d",ts))
+    print("[16] FAILED: duplicate adr number allowed"); sys.exit(1)
+except sqlite3.IntegrityError:
+    print("[16] adrs UNIQUE(number): OK")
+
+# 17) commit_links 去重 + 级联
+cur.execute("""INSERT INTO commit_links(id,task_id,repo_path,commit_hash,subject,created_at)
+               VALUES (?,?,?,?,?,?)""",
+            ("cl1","tg","D:/repo","abc123","fix: linker",ts))
+try:
+    cur.execute("""INSERT INTO commit_links(id,task_id,repo_path,commit_hash,created_at)
+                   VALUES (?,?,?,?,?)""",
+                ("cl2","tg","D:/repo","abc123",ts))
+    print("[17] FAILED: duplicate commit link allowed"); sys.exit(1)
+except sqlite3.IntegrityError:
+    print("[17] commit_links UNIQUE(repo,hash): OK")
+cur.execute("DELETE FROM tasks WHERE id='tg'")
+cl_left = cur.execute("SELECT COUNT(*) FROM commit_links WHERE task_id='tg'").fetchone()[0]
+pd_task = cur.execute("SELECT task_id FROM policy_decisions WHERE id='pd1'").fetchone()[0]
+adr_task = cur.execute("SELECT task_id FROM adrs WHERE id='adr1'").fetchone()[0]
+print(f"[18] governance cascade: commit_links_left={cl_left} policy.task={pd_task} adr.task={adr_task}")
+assert cl_left == 0 and pd_task is None and adr_task is None
+
 con.commit()
 print("\nALL CHECKS PASSED ✅")

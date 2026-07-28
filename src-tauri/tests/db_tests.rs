@@ -47,13 +47,13 @@ fn events_assign_sequential_seq() {
     let s = common::temp_state();
     let t = s.db.create_task(sample_task()).unwrap();
     for i in 0..3 {
-        s.db.append_event(NewEvent {
-            task_id: t.id.clone(),
-            kind: EventKind::Step,
-            summary: format!("step {i}"),
-            detail: None,
-            evidence_ref: None,
-        })
+        s.db.append_event(NewEvent::basic(
+            t.id.clone(),
+            EventKind::Step,
+            format!("step {i}"),
+            None,
+            None,
+        ))
         .unwrap();
     }
     let events = s.db.list_events(&t.id).unwrap();
@@ -67,14 +67,8 @@ fn events_assign_sequential_seq() {
 fn append_event_to_missing_task_is_not_found() {
     let s = common::temp_state();
     let err =
-        s.db.append_event(NewEvent {
-            task_id: "nope".into(),
-            kind: EventKind::Note,
-            summary: "x".into(),
-            detail: None,
-            evidence_ref: None,
-        })
-        .unwrap_err();
+        s.db.append_event(NewEvent::basic("nope", EventKind::Note, "x", None, None))
+            .unwrap_err();
     assert_eq!(err.code, "not_found");
 }
 
@@ -90,6 +84,8 @@ fn skill_lifecycle_and_usage_counts() {
             tags: vec!["tauri".into()],
             source_task_id: Some(t.id.clone()),
             status: SkillStatus::Draft,
+            origin_agent: None,
+            origin_model: None,
         })
         .unwrap();
     assert_eq!(sk.version, 1);
@@ -135,6 +131,8 @@ fn failure_signature_dedup() {
         fix: Some("装 VS 工具链".into()),
         guard_rule: "构建前确认装了 VS C++ 工具链".into(),
         tags: vec!["tauri".into(), "build".into()],
+        origin_agent: None,
+        origin_model: None,
     };
     let f = s.db.insert_failure(mk("sig-1")).unwrap();
     assert_eq!(f.occurrences, 1);

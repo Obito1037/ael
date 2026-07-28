@@ -1,62 +1,37 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from "@playwright/test";
 
-test('Antigravity GUI Main Flow', async ({ page }) => {
-  await page.goto('/');
+// 浏览器预览(内置 mock)下的治理层 UI 冒烟测试。
+// 需要先起 dev server:pnpm dev(http://localhost:1420)。
 
-  // 1. 新建任务 (Create Task)
-  await page.click('button:has-text("新建任务")');
-  await page.fill('input[placeholder*="Optimize PostgreSQL"]', 'E2E Flow Task');
-  await page.fill('textarea[placeholder*="详细描述"]', 'Normal task');
-  await page.click('button:has-text("确认启动")');
-  await expect(page.locator('h3:has-text("E2E Flow Task")').first()).toBeVisible();
+test("治理层导航与四出口渲染", async ({ page }) => {
+  await page.goto("/");
 
-  // Click into the task
-  await page.click('h3:has-text("E2E Flow Task")');
+  // 侧栏与总览
+  await expect(page.locator("aside")).toContainText("AEL");
+  await expect(page.locator("main h1")).toHaveText("总览");
 
-  // 2. 追加几条证据 (Append Events: error, fix)
-  await page.click('button:has-text("追加证据")');
-  await page.selectOption('select', 'error');
-  await page.fill('input[placeholder="事件标题..."]', 'Encountered test error');
-  await page.click('button:has-text("保存")');
-  await expect(page.locator('span:has-text("Encountered test error")')).toBeVisible();
+  // 出口③ 海关:命令试判器
+  await page.click('aside button:has-text("海关")');
+  await expect(page.locator("main h1")).toHaveText("海关裁决");
+  const probe = page.getByPlaceholder("输入一条命令,预演海关裁决…");
+  await probe.fill("rm -rf /");
+  await page.click('main button:has-text("试判")');
+  await expect(page.locator("main")).toContainText("扣留");
+  await expect(page.locator("main")).toContainText("destructive_fs");
 
-  await page.click('button:has-text("追加证据")');
-  await page.selectOption('select', 'fix');
-  await page.fill('input[placeholder="事件标题..."]', 'Fixed the error');
-  await page.click('button:has-text("保存")');
-  await expect(page.locator('span:has-text("Fixed the error")')).toBeVisible();
+  // 出口① Review Brief
+  await page.click('aside button:has-text("Review Brief")');
+  await expect(page.locator("main h1")).toHaveText("Review Brief");
 
-  // 3. finalize 
-  await page.click('button:has-text("Finalize Task")');
-  await expect(page.locator('text=任务已验证并沉淀')).toBeVisible();
+  // 出口② 行级溯源
+  await page.click('aside button:has-text("行级溯源")');
+  await expect(page.locator("main h1")).toHaveText("行级溯源");
 
-  // 4. 看到沉淀的 draft Skill (Navigate to Skills tab)
-  await page.click('button:has-text("返回任务列表")');
-  await page.click('button:has-text("技能")');
-  await expect(page.locator('h3:has-text("Draft Skill from E2E Flow Task")')).toBeVisible();
+  // 出口④ 活文档 ADR
+  await page.click('aside button:has-text("活文档")');
+  await expect(page.locator("main h1")).toHaveText("活文档 ADR");
 
-  // 5. 开一个相似任务 -> 确认 Failure Guard
-  await page.click('button:has-text("任务")'); // Back to tasks
-  await page.click('button:has-text("新建任务")');
-  await page.fill('input[placeholder*="Optimize PostgreSQL"]', 'JSON Data processing');
-  // MOCK_FAILURES tag matches "JSON"
-  await page.fill('textarea[placeholder*="详细描述"]', 'Parse JSON configuration');
-  await page.click('button:has-text("确认启动")');
-
-  // Should see failure guard warning
-  await expect(page.locator('text=Failure Guard 拦截')).toBeVisible();
-  
-  // Click again to bypass
-  await page.click('button:has-text("确认启动")');
-  await expect(page.locator('h3:has-text("JSON Data processing")').first()).toBeVisible();
-
-  // 6. 导出 handover.zip
-  await page.click('button:has-text("交接")'); // Global handover button in Header
-  
-  // Modal pops up
-  await expect(page.locator('h2:has-text("导出接手包")')).toBeVisible();
-  await page.click('button:has-text("导出 handover.zip")');
-  
-  // Toast appears
-  await expect(page.locator('text=接手程序包制作完成。正在下载')).toBeVisible();
+  // 经验库(保鲜期)
+  await page.click('aside button:has-text("经验库")');
+  await expect(page.locator("main")).toContainText("保鲜");
 });

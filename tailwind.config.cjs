@@ -1,52 +1,50 @@
-const animate = require("tailwindcss-animate");
-
 /** @type {import('tailwindcss').Config} */
+// 颜色全部走 CSS 变量(--c-* 为「R G B」通道值),因此支持像 VSCode 一样运行时换主题,
+// 且保留 tailwind 的透明度修饰符(text-ink/50、border-ink/10 等)。
+const withVar = (name) => `rgb(var(${name}) / <alpha-value>)`;
+
 module.exports = {
   darkMode: ["class"],
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
-        border: "hsl(var(--border))",
-        input: "hsl(var(--input))",
-        ring: "hsl(var(--ring))",
-        background: "hsl(var(--background))",
-        foreground: "hsl(var(--foreground))",
-        primary: {
-          DEFAULT: "hsl(var(--primary))",
-          foreground: "hsl(var(--primary-foreground))",
-        },
-        secondary: {
-          DEFAULT: "hsl(var(--secondary))",
-          foreground: "hsl(var(--secondary-foreground))",
-        },
-        destructive: {
-          DEFAULT: "hsl(var(--destructive))",
-          foreground: "hsl(var(--destructive-foreground))",
-        },
-        muted: {
-          DEFAULT: "hsl(var(--muted))",
-          foreground: "hsl(var(--muted-foreground))",
-        },
-        accent: {
-          DEFAULT: "hsl(var(--accent))",
-          foreground: "hsl(var(--accent-foreground))",
-        },
-        popover: {
-          DEFAULT: "hsl(var(--popover))",
-          foreground: "hsl(var(--popover-foreground))",
-        },
-        card: {
-          DEFAULT: "hsl(var(--card))",
-          foreground: "hsl(var(--card-foreground))",
-        },
+        bg: withVar("--c-bg"),
+        panel: withVar("--c-panel"),
+        panel2: withVar("--c-panel2"),
+        ink: withVar("--c-ink"),
+        // 品牌强调色(可换主题;orange 与 accent 同源,组件沿用 orange 即可)
+        orange: withVar("--c-accent"),
+        accent: withVar("--c-accent"),
+        green: withVar("--c-green"),
+        red: withVar("--c-red"),
+        blue: withVar("--c-blue"),
+        amber: withVar("--c-amber"),
+      },
+      fontFamily: {
+        sans: ['"Noto Sans SC"', '"PingFang SC"', '"Microsoft YaHei"', "sans-serif"],
+        mono: ['"JetBrains Mono"', "ui-monospace", "Consolas", "monospace"],
+        display: ['"Space Grotesk"', '"Noto Sans SC"', "sans-serif"],
       },
       borderRadius: {
-        lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
+        xl: "14px",
+        lg: "11px",
+      },
+      keyframes: {
+        "fade-in": {
+          from: { opacity: "0", transform: "translateY(8px)" },
+          to: { opacity: "1", transform: "none" },
+        },
+        blink: {
+          "0%,100%": { opacity: "1" },
+          "50%": { opacity: "0.25" },
+        },
+      },
+      animation: {
+        "fade-in": "fade-in 0.4s cubic-bezier(0.22,1,0.36,1)",
+        blink: "blink 1.2s ease-in-out infinite",
       },
     },
   },
-  plugins: [animate],
+  plugins: [],
 };

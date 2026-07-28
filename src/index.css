@@ -1,136 +1,256 @@
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@layer base {
-  :root {
-    --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
-    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-  }
+/* ============================================================
+   AEL · AI 编码治理层 —— 可换主题的高级简约设计系统
+   颜色以「R G B」通道存于 CSS 变量,主题切换只改变量,组件零改动。
+   ============================================================ */
 
-  body {
-    font-family: var(--font-sans);
-  }
+/* 默认主题 = 石墨橙(graphite) */
+:root,
+:root[data-theme="graphite"] {
+  color-scheme: dark;
+  --c-bg: 15 18 22;
+  --c-panel: 21 26 33;
+  --c-panel2: 27 34 43;
+  --c-ink: 233 237 242;
+  --c-accent: 255 106 43;
+  --c-green: 62 213 152;
+  --c-red: 255 80 99;
+  --c-blue: 91 155 255;
+  --c-amber: 244 183 64;
+  --accent-glow: rgba(255, 106, 43, 0.22);
 }
 
-@layer utilities {
-  .font-sans {
-    font-family: var(--font-sans);
-  }
-
-  .font-mono {
-    font-family: var(--font-mono);
-  }
-
-  .scrollbar-hide {
-    -ms-overflow-style: none;
-    scrollbar-width: none;
-  }
-
-  .scrollbar-hide::-webkit-scrollbar {
-    display: none;
-  }
+/* 午夜蓝 */
+:root[data-theme="midnight"] {
+  color-scheme: dark;
+  --c-bg: 10 14 26;
+  --c-panel: 17 23 41;
+  --c-panel2: 23 31 54;
+  --c-ink: 228 235 247;
+  --c-accent: 84 148 255;
+  --c-green: 52 211 153;
+  --c-red: 248 113 113;
+  --c-blue: 125 178 255;
+  --c-amber: 245 191 87;
+  --accent-glow: rgba(84, 148, 255, 0.24);
 }
 
-/* Base custom scrollbar for better visual appearance */
+/* 深林绿 */
+:root[data-theme="forest"] {
+  color-scheme: dark;
+  --c-bg: 13 20 17;
+  --c-panel: 19 29 24;
+  --c-panel2: 26 40 33;
+  --c-ink: 228 240 232;
+  --c-accent: 52 211 153;
+  --c-green: 74 222 128;
+  --c-red: 248 113 113;
+  --c-blue: 96 165 250;
+  --c-amber: 245 191 87;
+  --accent-glow: rgba(52, 211, 153, 0.22);
+}
+
+/* 暗紫水晶 */
+:root[data-theme="amethyst"] {
+  color-scheme: dark;
+  --c-bg: 17 14 26;
+  --c-panel: 26 21 38;
+  --c-panel2: 35 28 52;
+  --c-ink: 235 230 246;
+  --c-accent: 167 139 250;
+  --c-green: 74 222 128;
+  --c-red: 244 114 154;
+  --c-blue: 129 140 248;
+  --c-amber: 245 191 87;
+  --accent-glow: rgba(167, 139, 250, 0.26);
+}
+
+/* 石灰白(浅色) */
+:root[data-theme="daylight"] {
+  color-scheme: light;
+  --c-bg: 244 245 247;
+  --c-panel: 255 255 255;
+  --c-panel2: 236 238 241;
+  --c-ink: 26 29 34;
+  --c-accent: 226 88 20;
+  --c-green: 22 163 74;
+  --c-red: 220 38 38;
+  --c-blue: 37 99 235;
+  --c-amber: 217 119 6;
+  --accent-glow: rgba(226, 88, 20, 0.18);
+}
+
+/* 高对比 */
+:root[data-theme="contrast"] {
+  color-scheme: dark;
+  --c-bg: 0 0 0;
+  --c-panel: 12 12 12;
+  --c-panel2: 20 20 20;
+  --c-ink: 255 255 255;
+  --c-accent: 255 138 46;
+  --c-green: 78 245 168;
+  --c-red: 255 92 110;
+  --c-blue: 120 176 255;
+  --c-amber: 255 202 74;
+  --accent-glow: rgba(255, 138, 46, 0.3);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* 换主题瞬间关闭一切过渡,强制 var 相关颜色即时重算(避免过渡卡在旧值) */
+:root.theme-switching *,
+:root.theme-switching *::before,
+:root.theme-switching *::after {
+  transition: none !important;
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: rgb(var(--c-bg));
+  color: rgb(var(--c-ink));
+  font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  transition: background 0.35s ease, color 0.35s ease;
+}
+
+/* 蓝图网格底纹 —— 用 ink 变量,浅色主题自动变成淡黑线 */
+.grid-backdrop::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgb(var(--c-ink) / 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(var(--c-ink) / 0.03) 1px, transparent 1px);
+  background-size: 46px 46px;
+  mask-image: radial-gradient(120% 90% at 50% 0%, #000 35%, transparent 100%);
+}
+
+::selection {
+  background: rgb(var(--c-accent));
+  color: rgb(var(--c-bg));
+}
+
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 9px;
+  height: 9px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #c4c7c7;
-  border-radius: 4px;
+  background: rgb(var(--c-ink) / 0.14);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #a0a4a4;
+  background: rgb(var(--c-ink) / 0.26);
+  background-clip: padding-box;
 }
 
-.thread-line::before {
-  content: '';
-  position: absolute;
-  left: 15px;
-  top: 32px;
-  bottom: -32px;
-  width: 1px;
-  background-color: #E2E8F0;
-  z-index: 0;
+button {
+  font-family: inherit;
+  cursor: pointer;
 }
-.thread-item:last-child .thread-line::before {
-  display: none;
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+:focus-visible {
+  outline: 2px solid rgb(var(--c-accent) / 0.7);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
-/* Animations */
-@keyframes spin-slow {
-  from {
-    transform: rotate(0deg);
+@layer utilities {
+  .font-mono {
+    font-family: "JetBrains Mono", ui-monospace, Consolas, monospace;
   }
-  to {
-    transform: rotate(360deg);
+  .font-display {
+    font-family: "Space Grotesk", "Noto Sans SC", sans-serif;
+  }
+  .tracking-kicker {
+    letter-spacing: 0.22em;
+  }
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+  /* 强调色辉光(按钮 hover),随主题变化 */
+  .accent-glow {
+    box-shadow: 0 10px 30px var(--accent-glow);
   }
 }
-@keyframes fade-in {
+
+/* 记录仪脉冲点 */
+.rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgb(var(--c-accent));
+  animation: blink 1.3s ease-in-out infinite;
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.xterm-host .xterm {
+  padding: 12px 14px;
+}
+.xterm-viewport::-webkit-scrollbar {
+  width: 9px;
+}
+
+@keyframes slide-down {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(-12px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
   }
 }
-.animate-spin-slow {
-  animation: spin-slow 12s linear infinite;
-}
-.animate-fade-in {
-  animation: fade-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+.animate-slide-down {
+  animation: slide-down 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* Premium Aesthetic Classes */
-.mesh-gradient {
-  background-color: #f6f8fb;
-  background-image: 
-    radial-gradient(at 40% 20%, hsla(258,80%,88%,0.5) 0px, transparent 50%),
-    radial-gradient(at 80% 0%, hsla(189,100%,86%,0.4) 0px, transparent 50%),
-    radial-gradient(at 0% 50%, hsla(355,85%,93%,0.6) 0px, transparent 50%),
-    radial-gradient(at 80% 50%, hsla(340,70%,88%,0.4) 0px, transparent 50%),
-    radial-gradient(at 0% 100%, hsla(22,100%,87%,0.4) 0px, transparent 50%),
-    radial-gradient(at 80% 100%, hsla(242,100%,80%,0.2) 0px, transparent 50%);
-  background-size: 200% 200%;
-  animation: mesh-movement 20s ease-in-out infinite alternate;
+/* 主题切换弹层 */
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
-
-@keyframes mesh-movement {
-  0% { background-position: 0% 0%; }
-  100% { background-position: 100% 100%; }
+.animate-pop-in {
+  animation: pop-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
-
-.glass-panel {
-  background: rgba(255, 255, 255, 0.6);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border-right: 1px solid rgba(255, 255, 255, 0.4);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.4);
-  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.03);
-}
-
-.glass-card {
-  background: rgba(255, 255, 255, 0.75);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  box-shadow: 0 8px 32px rgba(124, 58, 237, 0.03);
-  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.glass-card:hover {
-  transform: translateY(-3px) scale(1.005);
-  box-shadow: 0 14px 40px rgba(124, 58, 237, 0.08);
-  background: rgba(255, 255, 255, 0.9);
-  border-color: rgba(124, 58, 237, 0.15);
-}
-

@@ -30,7 +30,7 @@ decision: 选用 rusqlite bundled :: 免装系统 sqlite";
 fn claude_code_adapter_classifies_and_writes() {
     let s = common::temp_state();
     let id = new_task(&s);
-    let written = adapter::ingest(&s.db, &id, "claude_code", RAW).unwrap();
+    let written = adapter::ingest(&s.db, &id, "claude_code", None, RAW).unwrap();
     assert_eq!(written.len(), 5);
 
     let kinds: Vec<EventKind> = written.iter().map(|e| e.kind).collect();
@@ -51,13 +51,13 @@ fn claude_code_adapter_classifies_and_writes() {
 fn codex_adapter_and_unknown_fallback() {
     let s = common::temp_state();
     let id = new_task(&s);
-    let a = adapter::ingest(&s.db, &id, "codex", "step: a\nerror: boom").unwrap();
+    let a = adapter::ingest(&s.db, &id, "codex", None, "step: a\nerror: boom").unwrap();
     assert_eq!(a.len(), 2);
     assert_eq!(a[1].kind, EventKind::Error);
 
     // 未知来源回退到通用解析,不报错
     let id2 = new_task(&s);
-    let b = adapter::ingest(&s.db, &id2, "mystery-agent", "note: hi").unwrap();
+    let b = adapter::ingest(&s.db, &id2, "mystery-agent", None, "note: hi").unwrap();
     assert_eq!(b.len(), 1);
     assert_eq!(b[0].kind, EventKind::Note);
 }

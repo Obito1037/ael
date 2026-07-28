@@ -12,9 +12,12 @@
 pub mod init;
 pub mod schema;
 
+mod adr;
 mod agent;
+mod blame;
 mod event;
 mod failure;
+mod policy;
 mod provider;
 mod skill;
 mod task;
@@ -33,7 +36,9 @@ pub struct AelPaths {
     pub backups: PathBuf,
     pub skills: PathBuf,
     pub handovers: PathBuf,
+    pub briefs: PathBuf,
     pub settings_file: PathBuf,
+    pub policy_file: PathBuf,
 }
 
 /// 数据层句柄。内部串行化访问同一个 SQLite 连接。

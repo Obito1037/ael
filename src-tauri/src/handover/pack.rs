@@ -2,8 +2,10 @@
 //! zip 布局见 contracts/handover-schema.json $zip_layout:
 //!   manifest.json / handover_prompt.md / evidence/
 
-use super::schema::{Manifest, ManifestEvent, ManifestTask, HANDOVER_SCHEMA_VERSION};
-use crate::engine::{handover as engine_handover, search};
+use super::schema::{
+    Manifest, ManifestEvent, ManifestOrigin, ManifestTask, AHP_VERSION, HANDOVER_SCHEMA_VERSION,
+};
+use crate::engine::{brief, handover as engine_handover, search};
 use crate::error::AelResult;
 use crate::models::{HandoverInclude, Settings};
 use crate::state::AppState;
@@ -21,6 +23,8 @@ pub fn export_handover(
 ) -> AelResult<PathBuf> {
     let settings = state.settings_snapshot();
     let manifest = build_manifest(state, task_id, include.unwrap_or_default(), &settings)?;
+    // 出口①的一页证据随包携带(AHP)。
+    let brief_md = brief::compile(&state.db, task_id).map(|b| b.markdown).ok();
 
     let dest = state.db.paths.handovers.join(format!("{task_id}.zip"));
     let file = std::fs::File::create(&dest)?;
@@ -35,7 +39,12 @@ pub fn export_handover(
     zip.start_file("handover_prompt.md", opts)?;
     zip.write_all(manifest.handover_prompt.as_bytes())?;
 
-    // evidence/ 目录占位(实际证据文件拷贝留待 Codex 按 evidence_ref 实现)。
+    if let Some(md) = &brief_md {
+        zip.start_file("brief.md", opts)?;
+        zip.write_all(md.as_bytes())?;
+    }
+
+    // evidence/ 目录占位(实际证据文件拷贝留待按 evidence_ref 实现)。
     zip.add_directory("evidence/", opts)?;
 
     zip.finish()?;
@@ -92,15 +101,35 @@ pub fn build_manifest(
 
     let handover_prompt = engine_handover::generate_handover_prompt(db, task_id, settings)?;
 
+    // v2:随包携带治理产物(ADR + 海关裁决账本)。
+    let adrs = db
+        .list_adrs(Some(task_id))?
+        .iter()
+        .map(|a| serde_json::to_value(a).unwrap_or(serde_json::Value::Null))
+        .collect();
+    let policy_decisions = db
+        .list_policy_decisions(None, Some(task_id), 500, 0)?
+        .iter()
+        .map(|d| serde_json::to_value(d).unwrap_or(serde_json::Value::Null))
+        .collect();
+
     Ok(Manifest {
         schema_version: HANDOVER_SCHEMA_VERSION,
+        ahp_version: Some(AHP_VERSION.to_string()),
         generated_at: now_iso(),
         generated_by: task.agent_id.clone(),
         ael_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        origin: Some(ManifestOrigin {
+            agent: task.agent_id.clone(),
+            model: None,
+        }),
         task: ManifestTask::from_task(&task),
         events: events_objs,
         relevant_skills,
         relevant_failures,
+        adrs,
+        policy_decisions,
+        brief_path: Some("brief.md".to_string()),
         open_questions: include.open_questions.unwrap_or_default(),
         handover_prompt,
     })

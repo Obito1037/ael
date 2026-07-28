@@ -124,7 +124,9 @@ pub fn send_agent_input(
     session_id: String,
     text: String,
 ) -> AelResult<()> {
-    state.agents.send_input(&state.db, &app, &session_id, text)
+    state
+        .agents
+        .send_input(&state.db, &app, &state.gate, &session_id, text)
 }
 
 #[tauri::command]

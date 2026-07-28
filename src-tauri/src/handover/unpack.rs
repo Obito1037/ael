@@ -39,13 +39,13 @@ pub fn import_handover(state: &AppState, path: &str) -> AelResult<String> {
     events.sort_by_key(|e| e.seq);
     for e in &events {
         let kind = EventKind::from_db(&e.kind)?;
-        state.db.append_event(NewEvent {
-            task_id: task.id.clone(),
+        state.db.append_event(NewEvent::basic(
+            task.id.clone(),
             kind,
-            summary: e.summary.clone(),
-            detail: e.detail.clone(),
-            evidence_ref: e.evidence_ref.clone(),
-        })?;
+            e.summary.clone(),
+            e.detail.clone(),
+            e.evidence_ref.clone(),
+        ))?;
     }
 
     // 对齐导入时的状态。

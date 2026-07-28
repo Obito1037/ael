@@ -12,5 +12,12 @@ pub const MIGRATION_002_AGENT_RUNTIME: &str =
 pub const MIGRATION_003_PROVIDERS_MCP: &str =
     include_str!("../../../contracts/migrations/003-providers-mcp.sql");
 
+/// v3 → v4:治理层(actor/锚点、保鲜期、海关账本、ADR、commit 溯源)。
+pub const MIGRATION_004_GOVERNANCE: &str =
+    include_str!("../../../contracts/migrations/004-governance.sql");
+
+/// 默认海关策略,首次启动物化到 ~/.ael/policy.toml。
+pub const POLICY_DEFAULT_TOML: &str = include_str!("../../../contracts/policy-default.toml");
+
 /// 当前 schema 版本(对齐 schema_meta.version)。破坏性改动时 +1。
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;

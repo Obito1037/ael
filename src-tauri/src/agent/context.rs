@@ -402,6 +402,9 @@ fn discipline_section() -> String {
         "- When a mandatory constraint applies, state explicitly how you followed it.",
         "- Verify before declaring completion and report the exact command or artifact used.",
         "- If blocked, state the blocker and the next required input clearly.",
+        "- When you commit, append the provenance trailer so any line stays traceable to this task:",
+        "  git commit -m \"<subject>\" -m \"AEL-Task: <task-id>\"",
+        "- A runtime policy gate sits between you and the shell: destructive commands (rm -rf, secret egress, DROP TABLE, force-push to main) will be held for human approval. Prefer safe, reversible steps.",
         "",
     ]
     .join("\n")

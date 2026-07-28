@@ -1,4 +1,5 @@
 //! failures 表 CRUD + FTS5 召回。Failure Guard 的数据源。
+//! v2:origin_agent/origin_model(经验保鲜期口径与 Skill 对齐)。
 
 use super::{tags_from_json, tags_to_json, Db};
 use crate::error::AelResult;
@@ -7,7 +8,8 @@ use crate::util::{new_id, now_iso};
 use rusqlite::{params, OptionalExtension, Row};
 
 // 对外(IPC)字段。表里另有 task_id/source_event_id/normalized_text/embedding/时间戳。
-const COLS: &str = "id,signature,description,root_cause,fix,guard_rule,tags,occurrences";
+const COLS: &str =
+    "id,signature,description,root_cause,fix,guard_rule,tags,occurrences,origin_agent,origin_model";
 
 fn map_failure(row: &Row) -> rusqlite::Result<Failure> {
     let tags_str: String = row.get(6)?;
@@ -20,6 +22,8 @@ fn map_failure(row: &Row) -> rusqlite::Result<Failure> {
         guard_rule: row.get(5)?,
         tags: tags_from_json(&tags_str),
         occurrences: row.get(7)?,
+        origin_agent: row.get(8)?,
+        origin_model: row.get(9)?,
     })
 }
 
@@ -67,8 +71,8 @@ impl Db {
         conn.execute(
             "INSERT INTO failures
              (id,task_id,source_event_id,signature,normalized_text,description,
-              root_cause,fix,guard_rule,tags,occurrences,created_at,last_seen_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?11)",
+              root_cause,fix,guard_rule,tags,occurrences,origin_agent,origin_model,created_at,last_seen_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12,?13,?13)",
             params![
                 id,
                 input.task_id,
@@ -80,6 +84,8 @@ impl Db {
                 input.fix,
                 input.guard_rule,
                 tags_to_json(&input.tags),
+                input.origin_agent,
+                input.origin_model,
                 now,
             ],
         )?;
@@ -122,7 +128,7 @@ impl Db {
         ))?;
         let rows = stmt.query_map(params![match_expr, limit], |row| {
             let failure = map_failure(row)?;
-            let rank: f64 = row.get(8)?;
+            let rank: f64 = row.get(10)?;
             Ok((failure, rank))
         })?;
         let mut out = Vec::new();

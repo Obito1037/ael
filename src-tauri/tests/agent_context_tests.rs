@@ -29,13 +29,13 @@ fn append(
 ) {
     state
         .db
-        .append_event(NewEvent {
-            task_id: task_id.into(),
+        .append_event(NewEvent::basic(
+            task_id.to_string(),
             kind,
-            summary: summary.into(),
-            detail: detail.map(str::to_string),
-            evidence_ref: None,
-        })
+            summary,
+            detail.map(str::to_string),
+            None,
+        ))
         .unwrap();
 }
 

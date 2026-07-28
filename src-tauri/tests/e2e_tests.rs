@@ -34,7 +34,7 @@ fn full_chain_no_breakpoints() {
 
     // 1) 任务 + 通过 adapter 把 Agent 输出落成证据链(SQLite)
     let id = make_task(&s, "构建 Tauri 应用 (首次)");
-    let events = adapter::ingest(&s.db, &id, "claude_code", AGENT_OUTPUT).unwrap();
+    let events = adapter::ingest(&s.db, &id, "claude_code", None, AGENT_OUTPUT).unwrap();
     assert_eq!(events.len(), 5, "5 行输出 → 5 条证据事件");
     assert_eq!(s.db.list_events(&id).unwrap().len(), 5);
 

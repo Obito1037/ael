@@ -38,6 +38,8 @@ pub fn create_skill(
         tags: tags.unwrap_or_default(),
         source_task_id,
         status: SkillStatus::Draft,
+        origin_agent: None,
+        origin_model: None,
     })
 }
 

@@ -1,7 +1,8 @@
 //! 初始化与备份:解析 `~/.ael/` 路径、建目录、首次建库、启动备份轮转、Settings 读写。
 
 use super::schema::{
-    MIGRATION_002_AGENT_RUNTIME, MIGRATION_003_PROVIDERS_MCP, SCHEMA_SQL, SCHEMA_VERSION,
+    MIGRATION_002_AGENT_RUNTIME, MIGRATION_003_PROVIDERS_MCP, MIGRATION_004_GOVERNANCE,
+    POLICY_DEFAULT_TOML, SCHEMA_SQL, SCHEMA_VERSION,
 };
 use super::{AelPaths, Db};
 use crate::error::{AelError, AelResult};
@@ -26,7 +27,9 @@ pub fn paths_for(root: PathBuf) -> AelPaths {
         backups: root.join("backups"),
         skills: root.join("skills"),
         handovers: root.join("handovers"),
+        briefs: root.join("briefs"),
         settings_file: root.join("settings.json"),
+        policy_file: root.join("policy.toml"),
         root,
     }
 }
@@ -67,6 +70,21 @@ pub fn save_settings(paths: &AelPaths, settings: &Settings) -> AelResult<()> {
     atomic_write(&paths.settings_file, text.as_bytes())
 }
 
+/// 读取海关策略文本;文件缺失则物化默认并返回默认(用户删除后仍可用)。
+pub fn load_policy_text(paths: &AelPaths) -> AelResult<String> {
+    if paths.policy_file.exists() {
+        Ok(fs::read_to_string(&paths.policy_file)?)
+    } else {
+        atomic_write(&paths.policy_file, POLICY_DEFAULT_TOML.as_bytes())?;
+        Ok(POLICY_DEFAULT_TOML.to_string())
+    }
+}
+
+/// 原子写入海关策略文本(校验在 gate 层完成)。
+pub fn save_policy_text(paths: &AelPaths, text: &str) -> AelResult<()> {
+    atomic_write(&paths.policy_file, text.as_bytes())
+}
+
 /// 原子写文件:同目录临时文件 + 持久化 + rename。
 pub fn atomic_write(target: &Path, bytes: &[u8]) -> AelResult<()> {
     if let Some(parent) = target.parent() {
@@ -89,12 +107,21 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> AelResult<()> {
 /// 打开(或首次创建)数据库,完成建目录、建库、启动备份。
 pub fn open(paths: AelPaths) -> AelResult<Db> {
     // 1. 建目录
-    for dir in [&paths.root, &paths.backups, &paths.skills, &paths.handovers] {
+    for dir in [
+        &paths.root,
+        &paths.backups,
+        &paths.skills,
+        &paths.handovers,
+        &paths.briefs,
+    ] {
         fs::create_dir_all(dir)?;
     }
 
-    // 2. 读 Settings(同时落地默认)
+    // 2. 读 Settings(同时落地默认);物化默认海关策略(用户删除后重启即恢复)
     let settings = load_settings(&paths)?;
+    if !paths.policy_file.exists() {
+        atomic_write(&paths.policy_file, POLICY_DEFAULT_TOML.as_bytes())?;
+    }
 
     // 3. 已有库 → 启动前备份并轮转
     if paths.db_file.exists() && fs::metadata(&paths.db_file)?.len() > 0 {
@@ -160,6 +187,12 @@ fn bootstrap_if_needed(conn: &Connection) -> AelResult<()> {
         conn.execute_batch(MIGRATION_003_PROVIDERS_MCP)
             .map_err(|e| AelError::internal(format!("迁移到 schema v3 失败: {e}")))?;
         version = 3;
+    }
+
+    if version < 4 {
+        conn.execute_batch(MIGRATION_004_GOVERNANCE)
+            .map_err(|e| AelError::internal(format!("迁移到 schema v4 失败: {e}")))?;
+        version = 4;
     }
 
     if version > SCHEMA_VERSION {

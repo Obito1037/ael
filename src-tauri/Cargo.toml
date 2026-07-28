@@ -27,6 +27,7 @@ regex = "1"
 log = "0.4"
 portable-pty = "0.9"
 ureq = "2"
+toml = "0.8"
 
 [profile.release]
 codegen-units = 1

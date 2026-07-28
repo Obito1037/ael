@@ -79,6 +79,32 @@ pub fn run() {
             commands::provider::test_provider,
             commands::provider::list_mcp_servers,
             commands::provider::save_mcp_server,
+            // ── v2 治理层 ──────────────────────────────────────
+            // 出口③ 运行时海关
+            commands::policy::gate_list_pending,
+            commands::policy::gate_resolve_pending,
+            commands::policy::gate_list_decisions,
+            commands::policy::gate_get_policy_text,
+            commands::policy::gate_set_policy_text,
+            commands::policy::gate_test_command,
+            commands::policy::gate_get_budget,
+            // 出口① Review Brief
+            commands::brief::compile_brief,
+            commands::brief::export_brief,
+            // 出口④ 活文档 ADR
+            commands::adr::list_adrs,
+            commands::adr::compile_adrs,
+            commands::adr::export_adrs,
+            // 出口② Agent Blame
+            commands::blame::generate_commit_trailer,
+            commands::blame::record_commit_link,
+            commands::blame::list_commit_links,
+            commands::blame::scan_repo_commits,
+            commands::blame::blame_line,
+            // 横向:智能路由 + 经验保鲜期
+            commands::route::recommend_agents,
+            commands::route::run_freshness_check,
+            commands::route::revalidate_skill,
         ])
         .run(tauri::generate_context!())
         .expect("启动 AEL Tauri 应用失败");

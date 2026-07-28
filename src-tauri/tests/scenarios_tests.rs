@@ -13,13 +13,13 @@ fn append(
     summary: &str,
     detail: Option<&str>,
 ) {
-    s.db.append_event(NewEvent {
-        task_id: task_id.into(),
+    s.db.append_event(NewEvent::basic(
+        task_id.to_string(),
         kind,
-        summary: summary.into(),
-        detail: detail.map(|d| d.into()),
-        evidence_ref: None,
-    })
+        summary,
+        detail.map(|d| d.into()),
+        None,
+    ))
     .unwrap();
 }
 

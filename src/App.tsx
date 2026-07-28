@@ -1,334 +1,165 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.5
- */
+import { useEffect, type ReactElement } from "react";
+import { listen } from "@tauri-apps/api/event";
+import {
+  Boxes,
+  FileCheck2,
+  Fingerprint,
+  Gauge,
+  LayoutGrid,
+  ScrollText,
+  Settings as SettingsIcon,
+  ShieldAlert,
+  TerminalSquare,
+} from "lucide-react";
+import { useStore } from "./store";
+import { ipc, isTauri } from "./lib/ipc";
+import { cx } from "./lib/format";
+import type {
+  BudgetPayload,
+  PendingCommand,
+  PolicyDecision,
+  SessionStatusPayload,
+  SignatureHitPayload,
+  ViewId,
+} from "./types";
+import { Toasts } from "./components/Toasts";
+import { ThemePicker } from "./components/ThemePicker";
+import { Overview } from "./views/Overview";
+import { Tasks } from "./views/Tasks";
+import { Console } from "./views/Console";
+import { Gate } from "./views/Gate";
+import { Briefs } from "./views/Briefs";
+import { Blame } from "./views/Blame";
+import { Memory } from "./views/Memory";
+import { Adr } from "./views/Adr";
+import { SettingsView } from "./views/Settings";
 
-import { lazy, Suspense, useState, useEffect } from 'react';
-import { 
-  Bot,
-  ClipboardList, 
-  Puzzle, 
-  ShieldAlert, 
-  Settings as SettingsIcon, 
-  X
-} from 'lucide-react';
-import Sidebar from './components/Sidebar';
-import Header from './components/Header';
-import TaskList from './components/TaskList';
-import TaskDetail from './components/TaskDetail';
-import SkillsLibrary from './components/SkillsLibrary';
-import FailureDefenseComponent from './components/FailureDefense';
-import HandoverModal from './components/HandoverModal';
-import SettingsView from './components/SettingsView';
-import ToastContainer, { ToastData } from './components/Toast';
-import { AppTab, Task, Skill, FailureDefense, TaskStatus } from './types';
-import { useStore } from './store';
+const NAV: { id: ViewId; label: string; icon: any; group?: string }[] = [
+  { id: "overview", label: "总览", icon: LayoutGrid },
+  { id: "tasks", label: "任务 · 证据链", icon: ScrollText },
+  { id: "console", label: "Agents 控制台", icon: TerminalSquare },
+  { id: "gate", label: "海关", icon: ShieldAlert },
+  { id: "briefs", label: "Review Brief", icon: FileCheck2 },
+  { id: "blame", label: "行级溯源", icon: Fingerprint },
+  { id: "memory", label: "经验库", icon: Boxes },
+  { id: "adr", label: "活文档 ADR", icon: Gauge },
+  { id: "settings", label: "设置", icon: SettingsIcon },
+];
 
-const AgentsConsole = lazy(() => import('./components/AgentsConsole'));
+const VIEWS: Record<ViewId, () => ReactElement> = {
+  overview: Overview,
+  tasks: Tasks,
+  console: Console,
+  gate: Gate,
+  briefs: Briefs,
+  blame: Blame,
+  memory: Memory,
+  adr: Adr,
+  settings: SettingsView,
+};
 
 export default function App() {
-  const [currentTab, setCurrentTab] = useState<AppTab>('tasks');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('全部状态');
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
-  const [isHandoverOpen, setIsHandoverOpen] = useState(false);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [toasts, setToasts] = useState<ToastData[]>([]);
+  const view = useStore((s) => s.view);
+  const setView = useStore((s) => s.setView);
+  const pending = useStore((s) => s.pending);
+  const Active = VIEWS[view];
 
-  const addToast = (message: string, type: ToastData['type'] = 'info') => {
-    const id = Math.random().toString(36).substring(2, 9);
-    setToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, 4500);
-  };
-
-  const removeToast = (id: string) => {
-    setToasts(prev => prev.filter(t => t.id !== id));
-  };
-
-  // Core databases state
-  const tasks = useStore(state => state.tasks);
-  const skills = useStore(state => state.skills);
-  const failures = useStore(state => state.failures);
-  const loadData = useStore(state => state.loadData);
-  const storeAddTask = useStore(state => state.addTask);
-  const storeUpdateTaskStatus = useStore(state => state.updateTaskStatus);
-  const storeAddSkill = useStore(state => state.addSkill);
-  const storeTriggerSkill = useStore(state => state.triggerSkill);
-  const storeAddFailure = useStore(state => state.addFailure);
-  const storeUpdateFailure = useStore(state => state.updateFailure);
-
+  // 初始加载 + 治理事件桥
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    const store = useStore.getState();
+    ipc.listTasks({ limit: 200 }).then(store.setTasks).catch(() => {});
+    ipc.listAgentSessions().then(store.setSessions).catch(() => {});
+    ipc.gateListPending().then(store.setPending).catch(() => {});
+    ipc.gateListDecisions({ limit: 100 }).then(store.setDecisions).catch(() => {});
 
-  // Synchronize state filter resets on tab change
-  const handleTabChange = (tab: AppTab) => {
-    setCurrentTab(tab);
-    setSearchQuery('');
-    setStatusFilter('全部状态');
-    setMobileMenuOpen(false);
-  };
-
-  // Action handlers
-  const handleSelectTask = (task: Task) => {
-    setSelectedTask(task);
-    // Also update current tab back to tasks so it shows the detail view!
-    setCurrentTab('tasks');
-  };
-
-  const handleUpdateTaskStatus = async (taskId: string, newStatus: TaskStatus) => {
-    await storeUpdateTaskStatus(taskId, newStatus);
-    // Refresh active selected task in details view too
-    if (selectedTask && selectedTask.id === taskId) {
-      const updatedTasks = useStore.getState().tasks;
-      setSelectedTask(updatedTasks.find(t => t.id === taskId) || null);
-    }
-  };
-
-  const handleFinalizeTask = async (taskId: string) => {
-    await useStore.getState().finalizeTask(taskId);
-    const updatedTasks = useStore.getState().tasks;
-    setSelectedTask(updatedTasks.find(t => t.id === taskId) || null);
-    addToast('任务已验证并沉淀 Draft Skill。', 'success');
-  };
-
-  const handleAppendEvent = async (taskId: string, ev: any) => {
-    await useStore.getState().appendEvent(taskId, ev);
-    const updatedTasks = useStore.getState().tasks;
-    setSelectedTask(updatedTasks.find(t => t.id === taskId) || null);
-    addToast('证据已追加', 'info');
-  };
-
-  const handleAddTask = async (newTask: Omit<Task, 'id' | 'updateTimeAgo' | 'timeline'>) => {
-    await storeAddTask(newTask);
-  };
-
-  const handleAddSkill = async (newSkill: Omit<Skill, 'id'>) => {
-    await storeAddSkill(newSkill);
-  };
-
-  const handleTriggerSkill = async (skillId: string) => {
-    await storeTriggerSkill(skillId);
-    
-    // Quick pop alert for dynamic trigger feed
-    const updatedSkills = useStore.getState().skills;
-    const triggerSkill = updatedSkills.find(s => s.id === skillId);
-    if (triggerSkill) {
-      addToast(`测试触发成功！技能名称: [${triggerSkill.name}]... 指标已递增。`, 'success');
-    }
-  };
-
-  const handleUpdateFailure = async (id: string, updatedItem: FailureDefense) => {
-    await storeUpdateFailure(id, updatedItem);
-  };
-
-  const handleAddFailure = async (newItem: Omit<FailureDefense, 'id' | 'occurrences'>) => {
-    await storeAddFailure(newItem);
-  };
-
-  const handleRefresh = async () => {
-    await loadData();
-    setSelectedTask(current => {
-      if (!current) return null;
-      return useStore.getState().tasks.find(t => t.id === current.id) || null;
-    });
-    addToast('正在获取最新多 Agent 执行上下文... 所有数据通道同步完成！', 'success');
-  };
-
-  // Reset original data database
-  const handleResetDatabase = () => {
-    if (confirm('确认还原系统日志数据库至 AEL v1.2.0-stable 初始预装数据？这会移除任何您自定义添加的任务与技能指标。')) {
-      loadData();
-      setSelectedTask(null);
-      setCurrentTab('tasks');
-      addToast('系统数据库已恢复至原始装配状态。', 'info');
-    }
-  };
+    if (!isTauri()) return;
+    const unlisten: Array<Promise<() => void>> = [
+      listen<PendingCommand>("gate://pending", (e) => {
+        useStore.getState().addPending(e.payload);
+        useStore.getState().toast(`海关扣留命令:${e.payload.commandText}`, "warning");
+      }),
+      listen<PolicyDecision>("gate://decision", (e) => {
+        useStore.getState().addDecision(e.payload);
+        useStore.getState().removePending(e.payload.id);
+      }),
+      listen<BudgetPayload>("gate://budget", (e) => {
+        useStore.getState().setBudget(e.payload.sessionId, e.payload.budget);
+        if (e.payload.budget.breakerTripped)
+          useStore.getState().toast("会话 token 预算已熔断", "error");
+      }),
+      listen<SignatureHitPayload>("guard://signature-hit", (e) => {
+        useStore
+          .getState()
+          .toast(`签名命中失败库(历史 ${e.payload.occurrences} 次):${e.payload.guardRule}`, "warning");
+      }),
+      listen<SessionStatusPayload>("agent://session-status", (e) => {
+        useStore.getState().upsertSession(e.payload.session);
+      }),
+    ];
+    return () => {
+      unlisten.forEach((p) => p.then((f) => f()).catch(() => {}));
+    };
+  }, []);
 
   return (
-    <div className="mesh-gradient text-black min-h-screen selection:bg-[#7c3aed]/20 selection:text-black antialiased font-sans flex flex-col md:flex-row relative">
-      <ToastContainer toasts={toasts} removeToast={removeToast} />
-      
-      {/* Sidebar - Desktop view */}
-      <Sidebar currentTab={currentTab} setCurrentTab={handleTabChange} addToast={addToast} />
-
-      {/* Sidebar - Mobile responsive overlay drawer */}
-      {mobileMenuOpen && (
-        <div className="fixed inset-0 bg-black/40 z-50 flex md:hidden" onClick={() => setMobileMenuOpen(false)}>
-          <div 
-            className="w-[240px] bg-white h-full p-6 flex flex-col gap-6"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex justify-between items-center pb-4 border-b border-[#E2E8F0]">
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 bg-black text-white rounded flex items-center justify-center font-bold text-sm">A</div>
-                <span className="font-sans font-bold text-black text-lg">AEL Registry</span>
-              </div>
-              <button onClick={() => setMobileMenuOpen(false)} className="text-[#747878] hover:text-black">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <nav className="flex flex-col gap-2">
-              <button
-                onClick={() => handleTabChange('tasks')}
-                className={`flex items-center gap-3 px-4 py-2.5 rounded text-left font-sans text-sm ${
-                  currentTab === 'tasks' ? 'font-semibold bg-[#eceef0] border-l-2 border-black' : 'text-[#444748] hover:bg-[#f2f4f6]'
-                }`}
-              >
-                <ClipboardList className="w-5 h-5 text-black" />
-                <span>任务</span>
-              </button>
-              <button
-                onClick={() => handleTabChange('agents')}
-                className={`flex items-center gap-3 px-4 py-2.5 rounded text-left font-sans text-sm ${
-                  currentTab === 'agents' ? 'font-semibold bg-[#eceef0] border-l-2 border-black' : 'text-[#444748] hover:bg-[#f2f4f6]'
-                }`}
-              >
-                <Bot className="w-5 h-5 text-black" />
-                <span>Agents</span>
-              </button>
-              <button
-                onClick={() => handleTabChange('skills')}
-                className={`flex items-center gap-3 px-4 py-2.5 rounded text-left font-sans text-sm ${
-                  currentTab === 'skills' ? 'font-semibold bg-[#eceef0] border-l-2 border-black' : 'text-[#444748] hover:bg-[#f2f4f6]'
-                }`}
-              >
-                <Puzzle className="w-5 h-5 text-black" />
-                <span>技能</span>
-              </button>
-              <button
-                onClick={() => handleTabChange('failures')}
-                className={`flex items-center gap-3 px-4 py-2.5 rounded text-left font-sans text-sm ${
-                  currentTab === 'failures' ? 'font-semibold bg-[#eceef0] border-l-2 border-black' : 'text-[#444748] hover:bg-[#f2f4f6]'
-                }`}
-              >
-                <ShieldAlert className="w-5 h-5 text-black" />
-                <span>故障模式</span>
-              </button>
-              <button
-                onClick={() => handleTabChange('settings')}
-                className={`flex items-center gap-3 px-4 py-2.5 rounded text-left font-sans text-sm ${
-                  currentTab === 'settings' ? 'font-semibold bg-[#eceef0] border-l-2 border-black' : 'text-[#444748] hover:bg-[#f2f4f6]'
-                }`}
-              >
-                <SettingsIcon className="w-5 h-5 text-black" />
-                <span>设置</span>
-              </button>
-            </nav>
-            <div className="mt-auto pt-4 border-t border-[#E2E8F0]">
-              <p className="font-mono text-[9px] text-[#747878]">SYSTEM CODENAME: ANTIGRAVITY</p>
-            </div>
+    <div className="flex h-screen w-screen overflow-hidden bg-bg text-ink">
+      {/* 侧栏 */}
+      <aside className="flex w-[228px] shrink-0 flex-col border-r border-ink/10 bg-panel/60">
+        <div className="flex items-center gap-2.5 px-5 py-[18px]">
+          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-orange font-mono text-[13px] text-bg">
+            ▣
+          </span>
+          <div className="leading-none">
+            <div className="font-display text-[15px] font-bold tracking-wide text-ink">AEL</div>
+            <div className="mt-0.5 font-mono text-[9px] tracking-[0.3em] text-ink/35">治理层 · 2.0</div>
           </div>
         </div>
-      )}
 
-      {/* Right Core Workspace Panel */}
-      <div className="flex-1 min-w-0 md:pl-[240px]">
-        
-        {/* Persistent top Header Controls */}
-        <Header 
-          currentTab={currentTab}
-          searchQuery={searchQuery}
-          setSearchQuery={setSearchQuery}
-          statusFilter={statusFilter}
-          setStatusFilter={setStatusFilter}
-          onRefresh={handleRefresh}
-          onExportHandover={() => setIsHandoverOpen(true)}
-          onOpenMobileMenu={() => setMobileMenuOpen(true)}
-          addToast={addToast}
-        />
+        <nav className="mt-2 flex-1 space-y-0.5 px-3">
+          {NAV.map(({ id, label, icon: Icon }) => {
+            const active = view === id;
+            const badge = id === "gate" && pending.length > 0 ? pending.length : null;
+            return (
+              <button
+                key={id}
+                onClick={() => setView(id)}
+                className={cx(
+                  "group flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors",
+                  active
+                    ? "bg-ink/[0.05] text-ink"
+                    : "text-ink/50 hover:bg-ink/[0.03] hover:text-ink/80",
+                )}
+              >
+                <Icon className={cx("h-[17px] w-[17px]", active ? "text-orange" : "text-ink/40")} />
+                <span className="flex-1 text-left">{label}</span>
+                {badge != null && (
+                  <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-red px-1 font-mono text-[10px] font-bold text-white">
+                    {badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </nav>
 
-        {/* Viewport content */}
-        <main className="pt-24 px-6 md:px-8 pb-12 w-full max-w-[1100px] mx-auto min-h-[calc(100vh-64px)] overflow-x-hidden">
-          
-          {currentTab === 'tasks' && (
-            selectedTask ? (
-              <TaskDetail 
-                task={selectedTask} 
-                onBack={() => setSelectedTask(null)}
-                onUpdateStatus={handleUpdateTaskStatus}
-                onFinalize={handleFinalizeTask}
-                onAppendEvent={handleAppendEvent}
-                addToast={addToast}
-              />
-            ) : (
-              <TaskList 
-                tasks={tasks}
-                searchQuery={searchQuery}
-                statusFilter={statusFilter}
-                onSelectTask={handleSelectTask}
-                onAddTask={handleAddTask}
-                addToast={addToast}
-              />
-            )
-          )}
+        <div className="space-y-3 border-t border-ink/10 px-3 py-3">
+          <ThemePicker />
+          <p className="px-2 font-mono text-[9.5px] leading-relaxed tracking-wide text-ink/30">
+            本地优先 · 隐私不外传
+            <br />
+            黑匣子 · 海关 · 账本
+          </p>
+        </div>
+      </aside>
 
-          {currentTab === 'agents' && (
-            <Suspense fallback={<div className="text-sm text-[#747878]">加载 Agent 控制台...</div>}>
-              <AgentsConsole
-                tasks={tasks}
-                searchQuery={searchQuery}
-                statusFilter={statusFilter}
-                setCurrentTab={handleTabChange}
-                addToast={addToast}
-              />
-            </Suspense>
-          )}
+      {/* 主内容 */}
+      <main className="grid-backdrop relative flex-1 overflow-y-auto">
+        <div className="relative z-10 mx-auto max-w-[1180px] px-8 py-9 animate-fade-in" key={view}>
+          <Active />
+        </div>
+      </main>
 
-          {currentTab === 'skills' && (
-            <SkillsLibrary 
-              skills={skills}
-              searchQuery={searchQuery}
-              statusFilter={statusFilter}
-              onAddSkill={handleAddSkill}
-              onTriggerSkill={handleTriggerSkill}
-              addToast={addToast}
-            />
-          )}
-
-          {currentTab === 'failures' && (
-            <FailureDefenseComponent 
-              defenseItems={failures}
-              searchQuery={searchQuery}
-              onUpdateFailure={handleUpdateFailure}
-              onAddFailure={handleAddFailure}
-              addToast={addToast}
-            />
-          )}
-
-          {currentTab === 'settings' && (
-            <SettingsView 
-              onResetDatabase={handleResetDatabase} 
-              addToast={addToast} 
-            />
-          )}
-
-        </main>
-      </div>
-
-      {/* Global Handover Packet popup Overlay */}
-      {isHandoverOpen && (
-        <HandoverModal 
-          task={selectedTask || {
-            id: 'GLOBAL',
-            title: '全局系统级 Agent 手册交接 (Global Ledger Takeover)',
-            status: 'in_progress',
-            description: '包含当前登记的所有执行线程、活跃技能、以及防御模式下的所有拦截实例的全局接手机制。',
-            agentName: 'System Operator',
-            priority: 'High',
-            tags: ['Global', 'Ledger'],
-            updateTimeAgo: 'Just now',
-            derivedSkills: skills.map(s => s.name),
-            timeline: tasks.flatMap(t => t.timeline || [])
-          }}
-          isOpen={isHandoverOpen} 
-          onClose={() => setIsHandoverOpen(false)} 
-          addToast={addToast}
-        />
-      )}
-
+      <Toasts />
     </div>
   );
 }

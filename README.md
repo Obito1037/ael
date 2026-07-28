@@ -1,59 +1,72 @@
-# AEL
+# AEL 2.0 · AI 编码治理层
 
-AEL is a Tauri 2 desktop control plane for multi-agent work.
+> 本地优先的 AI 编码治理层:**黑匣子**(证据溯源)+ **海关**(运行时网关)+ **账本**(经验与责任资产)。
+> 让 AI 写的每一行代码 **可信 · 可控 · 可追责 · 可理解**。
 
-It combines:
+AEL 是一个 Tauri 2 桌面应用。1.0 的经验层内核(PTY 执行 → 证据链 → finalize → 经验库 → 约束注入)原样保留,
+2.0 在同一个内核上长出四个行业级出口:
 
-- task and evidence tracking
-- reusable Skill extraction
-- Failure Guard constraints
-- handover.zip export/import
-- Agent Runtime for launching Codex, Claude Code, Gemini, OpenCode, or a shell through PTY
+| 出口 | 能力 | 一句话 |
+|---|---|---|
+| ① Review Brief | 审得过来 | 千行 diff → 一页证据(目标 / 决策 / 已拦截错误 / 验证 / 风险) |
+| ② Agent Blame | 追得到责 | 任意一行 AI 代码 → 3 秒回放决策现场(commit trailer + 行级锚点) |
+| ③ 运行时海关 | 管得住手 | PTY 坐在 Agent 与 Shell 之间,危险命令扣在裁决线上人工放行 / 拦截 |
+| ④ 活文档 ADR | 读得懂 Why | decision 事件自动编译成架构决策记录 |
 
-## Development
+横向机制:经验保鲜期(模型换代自动降级待重验)、经验驱动智能路由、AHP 接手包开放标准。
+
+## 架构
+
+```
+前端(React 19 + Tailwind + xterm) ── Tauri IPC ──> 后端(Rust)
+  石墨底 + 记录仪橙                                  ├─ agent/   PTY 运行时 + 海关接线
+  九个视图:总览/任务/控制台/海关/                   ├─ engine/  policy·redact·brief·adr·blame·route·freshness
+  Brief/溯源/经验库/ADR/设置                          │           + guard·finalize·search·normalize(1.0)
+                                                     ├─ db/      SQLite(schema v4)
+                                                     └─ handover/ AHP v1 接手包
+```
+
+- 运行时海关策略在 `~/.ael/policy.toml`(首次启动物化,删除后重启恢复默认)。
+- 数据目录 `~/.ael/`:`ael.db` / `backups/` / `briefs/` / `handovers/` / `skills/` / `settings.json` / `policy.toml`。
+
+## 开发
 
 ```bash
 pnpm install
 pnpm tauri dev
 ```
 
-## Build
-
-Debug build:
+浏览器预览(不启动 Tauri,走内置 mock 数据):
 
 ```bash
-pnpm tauri build --debug
+pnpm dev   # 打开 http://localhost:1420
 ```
 
-Release build:
+## 构建
 
 ```bash
-pnpm tauri build
+pnpm tauri build          # release;安装包在 src-tauri/target/release/bundle/{msi,nsis}
+pnpm tauri build --debug  # debug
 ```
 
-Windows installers are generated under:
-
-```text
-src-tauri/target/release/bundle/msi
-src-tauri/target/release/bundle/nsis
-```
-
-## Verification
+## 验证
 
 ```bash
 pnpm typecheck
 pnpm build
-pnpm exec playwright test
-python contracts/validate_schema.py
-python src-tauri/verify_e2e.py
-python src-tauri/verify_scenarios.py
+
 cd src-tauri
-cargo test
+# Windows 上整包 cargo test 会连带编译 GUI bin(webview2/内存压力);按目标逐个跑:
+cargo test --lib
+cargo test --test db_tests -j 2
+cargo test --test governance_tests -j 2
+# 其余:adapter_tests / e2e_tests / handover_tests / scenarios_tests /
+#       agent_runtime_tests / agent_config_tests / agent_context_tests
 ```
 
-## Important Contracts
+## 契约
 
-- `contracts/ipc-commands.md`: frozen task/skill/failure/handover IPC v1
-- `contracts/agent-commands.md`: Agent Runtime IPC v1
-- `contracts/schema.sql`: SQLite schema v1
-- `contracts/INTEGRATION-POINTS.md`: external API / CC Switch / MCP integration notes
+- `design/REWRITE-2.0.md`:2.0 重写总规格(实现事实来源)
+- `contracts/schema.sql`:SQLite schema v4(治理层基线,已冻结)
+- `contracts/policy-default.toml`:海关默认策略
+- `src-tauri/src/models.rs`:领域模型 v2(与前端 `src/types.ts` 逐字段对齐)

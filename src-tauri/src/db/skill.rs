@@ -1,17 +1,19 @@
 //! skills 表 CRUD + FTS5 关键词检索。
 //! success_count/fail_count 由 skill_usages 触发器维护,本层不直接写。
+//! v2:origin_agent/origin_model + freshness(经验保鲜期)。
 
 use super::{tags_from_json, tags_to_json, Db};
 use crate::error::{AelError, AelResult};
-use crate::models::{NewSkill, Outcome, Skill, SkillPatch, SkillStatus};
+use crate::models::{Freshness, NewSkill, Outcome, Skill, SkillPatch, SkillStatus};
 use crate::util::{new_id, now_iso};
 use rusqlite::{params, Row};
 
-const COLS: &str = "id,name,trigger_text,body,tags,source_task_id,status,version,success_count,fail_count,created_at,updated_at";
+const COLS: &str = "id,name,trigger_text,body,tags,source_task_id,status,version,success_count,fail_count,origin_agent,origin_model,freshness,revalidated_at,created_at,updated_at";
 
 fn map_skill(row: &Row) -> rusqlite::Result<Skill> {
     let tags_str: String = row.get(4)?;
     let status_str: String = row.get(6)?;
+    let fresh_str: String = row.get(12)?;
     Ok(Skill {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -25,8 +27,14 @@ fn map_skill(row: &Row) -> rusqlite::Result<Skill> {
         version: row.get(7)?,
         success_count: row.get(8)?,
         fail_count: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        origin_agent: row.get(10)?,
+        origin_model: row.get(11)?,
+        freshness: Freshness::from_db(&fresh_str).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        revalidated_at: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }
 
@@ -37,8 +45,9 @@ impl Db {
         let conn = self.lock();
         conn.execute(
             "INSERT INTO skills
-             (id,name,trigger_text,body,tags,source_task_id,status,version,success_count,fail_count,created_at,updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,1,0,0,?8,?8)",
+             (id,name,trigger_text,body,tags,source_task_id,status,version,success_count,fail_count,
+              origin_agent,origin_model,freshness,created_at,updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,1,0,0,?8,?9,'fresh',?10,?10)",
             params![
                 id,
                 input.name,
@@ -47,6 +56,8 @@ impl Db {
                 tags_to_json(&input.tags),
                 input.source_task_id,
                 input.status.as_str(),
+                input.origin_agent,
+                input.origin_model,
                 now,
             ],
         )?;
@@ -126,6 +137,36 @@ impl Db {
         self.get_skill(id)
     }
 
+    /// 保鲜期状态迁移。revived=true 时刷新 revalidated_at 并把 origin_model 换成当前版本。
+    pub fn set_skill_freshness(
+        &self,
+        id: &str,
+        freshness: Freshness,
+        new_origin_model: Option<&str>,
+    ) -> AelResult<Skill> {
+        let now = now_iso();
+        let conn = self.lock();
+        let affected = match (freshness, new_origin_model) {
+            (Freshness::Fresh, Some(model)) => conn.execute(
+                "UPDATE skills SET freshness='fresh', origin_model=?1, revalidated_at=?2, updated_at=?2 WHERE id=?3",
+                params![model, now, id],
+            )?,
+            (Freshness::Fresh, None) => conn.execute(
+                "UPDATE skills SET freshness='fresh', revalidated_at=?1, updated_at=?1 WHERE id=?2",
+                params![now, id],
+            )?,
+            (Freshness::NeedsRevalidation, _) => conn.execute(
+                "UPDATE skills SET freshness='needs_revalidation', updated_at=?1 WHERE id=?2",
+                params![now, id],
+            )?,
+        };
+        drop(conn);
+        if affected == 0 {
+            return Err(AelError::not_found(format!("skill {id} 不存在")));
+        }
+        self.get_skill(id)
+    }
+
     pub fn record_skill_usage(
         &self,
         skill_id: &str,
@@ -142,6 +183,48 @@ impl Db {
             params![id, skill_id, task_id, outcome.as_str(), now],
         )?;
         Ok(())
+    }
+
+    /// 某 Skill 最近 n 次使用结局(新→旧),保鲜期复活/淘汰判定用。
+    pub fn recent_skill_outcomes(&self, skill_id: &str, n: i64) -> AelResult<Vec<Outcome>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT outcome FROM skill_usages WHERE skill_id=?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![skill_id, n], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(Outcome::from_db(&r?)?);
+        }
+        Ok(out)
+    }
+
+    /// 按 Agent kind 聚合任务量与经验成败(智能路由数据源)。
+    /// 返回 (agent_kind, task_count, success, fail)。
+    pub fn agent_track_records(&self) -> AelResult<Vec<(String, i64, i64, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT s.origin_agent,
+                    COUNT(DISTINCT s.source_task_id),
+                    COALESCE(SUM(s.success_count),0),
+                    COALESCE(SUM(s.fail_count),0)
+             FROM skills s
+             WHERE s.origin_agent IS NOT NULL AND s.origin_agent != ''
+             GROUP BY s.origin_agent",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// FTS5 关键词召回。`match_expr` 必须是已净化的 MATCH 表达式;空串直接返回空。
@@ -164,7 +247,7 @@ impl Db {
         ))?;
         let rows = stmt.query_map(params![match_expr, limit], |row| {
             let skill = map_skill(row)?;
-            let rank: f64 = row.get(12)?;
+            let rank: f64 = row.get(16)?;
             Ok((skill, rank))
         })?;
         let mut out = Vec::new();

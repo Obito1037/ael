@@ -1,97 +1,50 @@
-export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'verified' | 'failed' | 'abandoned';
-export type EventKind = 'step' | 'error' | 'fix' | 'verification' | 'decision' | 'note';
-export type SkillStatus = 'draft' | 'active' | 'deprecated';
-export interface AgentConfigTarget {
-  id: string;
-  name: string;
-  agentKind: string;
-  type: string;
-  path: string;
-  description: string;
-  backupPath?: string;
-}
+// 领域类型 · 与 src-tauri/src/models.rs(serde camelCase)逐字段对齐。
+// 枚举用后端的 snake_case 字符串字面量。
 
-export type AgentConfigFormat = 'json' | 'toml' | 'markdown';
+export type TaskStatus =
+  | "pending"
+  | "in_progress"
+  | "blocked"
+  | "verified"
+  | "failed"
+  | "abandoned";
 
-export interface AgentConfigContent {
-  target: AgentConfigTarget;
-  format: AgentConfigFormat;
-  content: string;
-}
+export type EventKind =
+  | "step"
+  | "error"
+  | "fix"
+  | "verification"
+  | "decision"
+  | "note";
 
-export interface ProviderConfig {
-  id: string;
-  name: string;
-  type: string;
-  authStrategy: 'env' | 'db' | 'oauth';
-  baseUrl?: string;
-  status: 'active' | 'inactive' | 'error';
-  isActive?: boolean;
-  targetApp?: string;
-  model?: string;
-  endpoint?: string;
-  apiKey?: string;
-}
-
-export interface MCPServerConfig {
-  id: string;
-  name: string;
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-  status: 'running' | 'stopped' | 'failed';
-  isActive?: boolean;
-}
-
-export type FailureStatus = 'active' | 'configured' | 'logged';
-export type RetrievalMode = 'keyword' | 'hybrid';
-export type SkillUsageOutcome = 'helped' | 'neutral' | 'harmful';
-export type AgentSessionStatus =
-  | 'starting'
-  | 'running'
-  | 'waiting'
-  | 'blocked'
-  | 'exited'
-  | 'killed'
-  | 'failed';
-export type TerminalDirection = 'input' | 'output' | 'system';
-export type WorkspaceLockKind = 'read' | 'write';
-export type AppTab = 'tasks' | 'agents' | 'skills' | 'failures' | 'settings';
-
-export interface TimelineEvent {
-  id: string;
-  type: string;
-  title: string;
-  timestamp: string;
-  description: string;
-  extraCode?: string;
-  extraLink?: { label: string; url: string };
-  fileAttachment?: string;
-}
+export type EventActor = "ai" | "human" | "guard" | "system";
+export type SkillStatus = "draft" | "active" | "deprecated";
+export type Freshness = "fresh" | "needs_revalidation";
+export type Outcome = "helped" | "neutral" | "harmful";
+export type PolicyAction = "allow" | "warn" | "hold" | "deny";
+export type PolicyVerdictKind =
+  | "passed"
+  | "warned"
+  | "approved"
+  | "denied"
+  | "auto_denied";
+export type DecidedBy = "policy" | "human";
+export type AdrStatus = "proposed" | "accepted" | "superseded";
+export type RetrievalMode = "keyword" | "hybrid";
 
 export interface Task {
   id: string;
   title: string;
-  goal?: string;
+  goal: string;
   status: TaskStatus;
   agentId?: string;
   repoPath?: string;
   repoBranch?: string;
   repoCommit?: string;
-  tags?: string[];
-  createdAt?: string;
-  updatedAt?: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
   closedAt?: string;
-
-  // UI compatibility
-  description?: string;
-  agentName?: string;
-  priority?: string;
-  updateTimeAgo?: string;
-  timeElapsed?: string;
-  timeline?: TimelineEvent[];
-  derivedSkills?: string[];
-  relatedFailuresRef?: string[];
 }
 
 export interface TaskEvent {
@@ -102,6 +55,10 @@ export interface TaskEvent {
   summary: string;
   detail?: string;
   evidenceRef?: string;
+  actor: EventActor;
+  sessionId?: string;
+  anchorFile?: string;
+  anchorLines?: string;
   createdAt: string;
 }
 
@@ -109,47 +66,32 @@ export interface Skill {
   id: string;
   name: string;
   trigger: string;
-  body?: string;
-  tags?: string[];
+  body: string;
+  tags: string[];
   sourceTaskId?: string;
   status: SkillStatus;
-  version?: number;
-  successCount?: number | '-';
-  failCount?: number | '-';
-  createdAt?: string;
-  updatedAt?: string;
-
-  // UI compatibility
-  failureCount?: number | '-';
+  version: number;
+  successCount: number;
+  failCount: number;
+  originAgent?: string;
+  originModel?: string;
+  freshness: Freshness;
+  revalidatedAt?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Failure {
   id: string;
-  signature?: string;
-  description?: string;
+  signature: string;
+  description: string;
   rootCause?: string;
   fix?: string;
-  guardRule?: string;
-  tags?: string[];
+  guardRule: string;
+  tags: string[];
   occurrences: number;
-
-  // UI compatibility
-  status?: FailureStatus;
-  name?: string;
-  repairMethod?: string;
-  constraint?: string;
-  autoRepairActive?: boolean;
-  upcomingAlertConfigured?: boolean;
-  errorSignature?: string;
-}
-
-export type FailureDefense = Failure;
-
-export interface GuardResult {
-  matchedFailures: Failure[];
-  suggestedSkills?: Skill[];
-  constraints: string[];
-  handoverPrompt: string;
+  originAgent?: string;
+  originModel?: string;
 }
 
 export interface RankedSkill {
@@ -157,25 +99,173 @@ export interface RankedSkill {
   score: number;
 }
 
+export interface GuardResult {
+  matchedFailures: Failure[];
+  suggestedSkills: Skill[];
+  constraints: string[];
+  handoverPrompt: string;
+}
+
+// ── 治理层 ─────────────────────────────────────────────────────
+
+export interface PolicyDecision {
+  id: string;
+  sessionId?: string;
+  taskId?: string;
+  ruleId: string;
+  action: PolicyAction;
+  verdict: PolicyVerdictKind;
+  commandText: string;
+  reason: string;
+  decidedBy: DecidedBy;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface PendingCommand {
+  id: string;
+  sessionId: string;
+  taskId: string;
+  commandText: string;
+  ruleId: string;
+  reason: string;
+  createdAt: string;
+  timeoutSecs: number;
+}
+
+export interface PolicyVerdict {
+  ruleId?: string;
+  action: PolicyAction;
+  reason: string;
+  matched: boolean;
+}
+
+export interface BudgetStatus {
+  enabled: boolean;
+  maxSessionTokens: number;
+  usedTokens: number;
+  ratio: number;
+  breakerTripped: boolean;
+}
+
+export interface AdrRecord {
+  id: string;
+  taskId?: string;
+  number: number;
+  title: string;
+  status: AdrStatus;
+  context: string;
+  decision: string;
+  consequences?: string;
+  sourceEventId?: string;
+  filePath?: string;
+  createdAt: string;
+}
+
+export interface CommitLink {
+  id: string;
+  taskId: string;
+  sessionId?: string;
+  repoPath: string;
+  commitHash: string;
+  subject?: string;
+  author?: string;
+  committedAt?: string;
+  createdAt: string;
+}
+
+export interface AgentSessionSummary {
+  id: string;
+  agentId: string;
+  commandLine: string;
+  startedAt: string;
+  endedAt?: string;
+  exitCode?: number;
+}
+
+export interface BlameReport {
+  file: string;
+  line: number;
+  commitHash?: string;
+  commitSubject?: string;
+  commitAuthor?: string;
+  linked: boolean;
+  task?: Task;
+  sessions: AgentSessionSummary[];
+  decisions: TaskEvent[];
+  humanConfirmations: TaskEvent[];
+  guardEvents: TaskEvent[];
+  adrs: AdrRecord[];
+}
+
+// Review Brief
+export interface BriefDecision {
+  summary: string;
+  reason?: string;
+  actor: EventActor;
+}
+export interface BriefErrorFixed {
+  error: string;
+  fix?: string;
+  signature?: string;
+  recurrences: number;
+}
+export interface BriefVerification {
+  summary: string;
+  evidenceRef?: string;
+}
+export interface BriefStats {
+  events: number;
+  sessions: number;
+  tokensEst: number;
+  humanConfirmed: number;
+  aiProposed: number;
+  durationSecs?: number;
+}
+export interface ReviewBrief {
+  taskId: string;
+  title: string;
+  goal: string;
+  status: TaskStatus;
+  generatedAt: string;
+  decisions: BriefDecision[];
+  errorsFixed: BriefErrorFixed[];
+  verifications: BriefVerification[];
+  interceptions: PolicyDecision[];
+  risks: string[];
+  stats: BriefStats;
+  markdown: string;
+}
+
+export interface AgentRecommendation {
+  agentKind: string;
+  score: number;
+  successCount: number;
+  failCount: number;
+  taskCount: number;
+  reasons: string[];
+}
+
 export interface FinalizeResult {
   task: Task;
   draftSkills: Skill[];
   draftFailures: Failure[];
+  brief: ReviewBrief;
+  adrs: AdrRecord[];
 }
 
-export interface HandoverInclude {
-  events?: boolean;
-  skills?: boolean;
-  failures?: boolean;
-  openQuestions?: string[];
-}
+// ── Agent Runtime ──────────────────────────────────────────────
 
-export interface Settings {
-  dataDir: string;
-  maxBackups: number;
-  retrievalMode: RetrievalMode;
-  guardMinScore: number;
-}
+export type AgentSessionStatus =
+  | "starting"
+  | "running"
+  | "waiting"
+  | "blocked"
+  | "exited"
+  | "killed"
+  | "failed";
+
+export type TerminalDirection = "input" | "output" | "system";
 
 export interface AgentProfile {
   id: string;
@@ -184,9 +274,8 @@ export interface AgentProfile {
   executable: string;
   defaultArgs: string[];
   available: boolean;
-  version: string;
-  path: string;
-  capabilities?: string[];
+  version?: string;
+  path?: string;
 }
 
 export interface AgentSession {
@@ -217,25 +306,69 @@ export interface AgentSnapshot {
   chunks: TerminalChunk[];
 }
 
-export interface TerminalChunkPayload {
-  sessionId: string;
-  chunk: TerminalChunk;
-}
-
-export interface SessionStatusPayload {
-  sessionId: string;
-  session: AgentSession;
-}
-
-export interface ParsedEventPayload {
-  sessionId: string;
-  event: TaskEvent;
-}
-
 export interface WorkspaceLock {
   id: string;
   repoPath: string;
   ownerSessionId: string;
-  lockKind: WorkspaceLockKind;
+  lockKind: "read" | "write";
   createdAt: string;
+}
+
+export interface Settings {
+  dataDir: string;
+  maxBackups: number;
+  retrievalMode: RetrievalMode;
+  guardMinScore: number;
+}
+
+export interface HandoverInclude {
+  events?: boolean;
+  skills?: boolean;
+  failures?: boolean;
+  openQuestions?: string[];
+}
+
+// ── Tauri 事件 payload ─────────────────────────────────────────
+
+export interface TerminalChunkPayload {
+  sessionId: string;
+  chunk: TerminalChunk;
+}
+export interface SessionStatusPayload {
+  sessionId: string;
+  session: AgentSession;
+}
+export interface ParsedEventPayload {
+  sessionId: string;
+  event: TaskEvent;
+}
+export interface BudgetPayload {
+  sessionId: string;
+  budget: BudgetStatus;
+}
+export interface SignatureHitPayload {
+  sessionId: string;
+  signature: string;
+  guardRule: string;
+  occurrences: number;
+  line: string;
+}
+
+// 视图
+export type ViewId =
+  | "overview"
+  | "tasks"
+  | "console"
+  | "gate"
+  | "briefs"
+  | "blame"
+  | "memory"
+  | "adr"
+  | "settings";
+
+export type ToastKind = "info" | "success" | "warning" | "error";
+export interface Toast {
+  id: number;
+  kind: ToastKind;
+  message: string;
 }

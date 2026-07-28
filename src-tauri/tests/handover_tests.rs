@@ -24,14 +24,8 @@ fn seed(s: &ael_lib::state::AppState) -> String {
         (EventKind::Fix, "安装 VS Build Tools"),
         (EventKind::Verification, "产出 .msi"),
     ] {
-        s.db.append_event(NewEvent {
-            task_id: t.id.clone(),
-            kind,
-            summary: sum.into(),
-            detail: None,
-            evidence_ref: None,
-        })
-        .unwrap();
+        s.db.append_event(NewEvent::basic(t.id.clone(), kind, sum, None, None))
+            .unwrap();
     }
     s.db.update_task_status(&t.id, TaskStatus::Verified)
         .unwrap();

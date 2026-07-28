@@ -1,9 +1,11 @@
-//! 多 Agent 运行时。负责发现/启动/管理 Codex、Claude Code 等交互式 CLI。
+//! 多 Agent 运行时 + 运行时海关接线。
 //!
 //! 设计目标:
 //! - 用 PTY 而不是普通 stdout 管道,保留交互式 CLI 的 TTY 行为。
-//! - 所有终端输入输出都进入 transcript,并通过 Tauri event 实时推给前端。
-//! - 输出按行复用 adapter 层沉淀为 task_events,让现有 Failure Guard / Skill / handover 链路继续工作。
+//! - 所有终端输入输出进入 transcript(落库前脱敏),并通过 Tauri event 实时推给前端。
+//! - 输出按行复用 adapter 沉淀为 task_events,让 Failure Guard / Skill / handover 链路继续工作。
+//! - v2:PTY 恰好坐在 Agent 与 Shell 之间 —— 逐行命令过「海关」策略引擎(事中裁决);
+//!   输出流实时命中历史失败签名;会话 token 预算熔断。
 
 pub mod compress;
 pub mod config;
@@ -12,8 +14,13 @@ pub mod usage;
 
 use crate::adapter;
 use crate::db::Db;
+use crate::engine::policy::PolicyGate;
+use crate::engine::{normalize, redact};
 use crate::error::{AelError, AelResult};
-use crate::models::TaskEvent;
+use crate::models::{
+    BudgetStatus, DecidedBy, NewPolicyDecision, PendingCommand, PolicyAction, PolicyDecision,
+    PolicyVerdictKind, TaskEvent,
+};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,6 +36,13 @@ use uuid::Uuid;
 const TERMINAL_CHUNK_EVENT: &str = "agent://terminal-chunk";
 const SESSION_STATUS_EVENT: &str = "agent://session-status";
 const PARSED_EVENT_EVENT: &str = "agent://parsed-event";
+// v2 治理事件
+const GATE_PENDING_EVENT: &str = "gate://pending";
+const GATE_DECISION_EVENT: &str = "gate://decision";
+const GATE_BUDGET_EVENT: &str = "gate://budget";
+const SIGNATURE_HIT_EVENT: &str = "guard://signature-hit";
+
+const BUDGET_RULE_ID: &str = "budget";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,9 +91,7 @@ impl AgentSessionStatus {
             "exited" => Ok(Self::Exited),
             "killed" => Ok(Self::Killed),
             "failed" => Ok(Self::Failed),
-            other => Err(AelError::internal(format!(
-                "非法 AgentSessionStatus: {other}"
-            ))),
+            other => Err(AelError::internal(format!("非法 AgentSessionStatus: {other}"))),
         }
     }
 }
@@ -123,9 +135,7 @@ impl TerminalDirection {
             "input" => Ok(Self::Input),
             "output" => Ok(Self::Output),
             "system" => Ok(Self::System),
-            other => Err(AelError::internal(format!(
-                "非法 TerminalDirection: {other}"
-            ))),
+            other => Err(AelError::internal(format!("非法 TerminalDirection: {other}"))),
         }
     }
 }
@@ -149,9 +159,7 @@ impl WorkspaceLockKind {
         match s {
             "read" => Ok(Self::Read),
             "write" => Ok(Self::Write),
-            other => Err(AelError::internal(format!(
-                "非法 WorkspaceLockKind: {other}"
-            ))),
+            other => Err(AelError::internal(format!("非法 WorkspaceLockKind: {other}"))),
         }
     }
 }
@@ -219,6 +227,31 @@ struct ParsedEventPayload {
     event: TaskEvent,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BudgetPayload {
+    session_id: String,
+    budget: BudgetStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SignatureHitPayload {
+    session_id: String,
+    signature: String,
+    guard_rule: String,
+    occurrences: i64,
+    line: String,
+}
+
+/// 会话预算阶段(只在迁移时发事件,防事件风暴)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BudgetPhase {
+    Normal,
+    Warned,
+    Tripped,
+}
+
 struct RuntimeSession {
     session: AgentSession,
     writer: Box<dyn Write + Send>,
@@ -227,11 +260,26 @@ struct RuntimeSession {
     chunks: Vec<TerminalChunk>,
     pending_output: String,
     auto_ingest: bool,
+    // v2 预算熔断计量
+    input_chars: u64,
+    output_chars: u64,
+    budget_phase: BudgetPhase,
+}
+
+/// 扣在裁决线上待人工处置的命令(内存态)。
+struct PendingHold {
+    session_id: String,
+    task_id: String,
+    text: String, // 原始待写入 PTY 的整行(含换行)
+    rule_id: String,
+    reason: String,
+    created_at: String,
 }
 
 #[derive(Default)]
 pub struct AgentRuntime {
     sessions: Mutex<HashMap<String, RuntimeSession>>,
+    pending: Mutex<HashMap<String, PendingHold>>,
 }
 
 impl AgentRuntime {
@@ -382,6 +430,9 @@ impl AgentRuntime {
                     chunks: Vec::new(),
                     pending_output: String::new(),
                     auto_ingest: opts.auto_ingest.unwrap_or(true),
+                    input_chars: 0,
+                    output_chars: 0,
+                    budget_phase: BudgetPhase::Normal,
                 },
             );
         }
@@ -438,16 +489,129 @@ impl AgentRuntime {
             }
         });
 
+        // 启动上下文注入走 raw 通道,不经海关(否则可能被 prompt 里的示例命令误扣)。
         if let Some(prompt) = opts.initial_prompt {
             if !prompt.trim().is_empty() {
-                self.send_input(db, &app, &session_id, format!("{prompt}\r\n"))?;
+                self.send_input_raw(db, &app, &session_id, format!("{prompt}\r\n"))?;
             }
         }
 
         Ok(session)
     }
 
+    /// 公共输入通道:经海关裁决。含换行的整行才被视作「命令提交」并送策略引擎。
     pub fn send_input(
+        &self,
+        db: &Db,
+        app: &AppHandle,
+        gate: &PolicyGate,
+        session_id: &str,
+        text: String,
+    ) -> AelResult<()> {
+        let is_submit = (text.contains('\n') || text.contains('\r')) && gate.apply_to_input();
+        if !is_submit {
+            // 单个控制键 / 半行输入:透传,不裁决。
+            return self.send_input_raw(db, app, session_id, text);
+        }
+
+        let task_id = self.session_task_id(session_id)?;
+        let command_line = text.trim().to_string();
+        if command_line.is_empty() {
+            return self.send_input_raw(db, app, session_id, text);
+        }
+
+        // 预算熔断优先。
+        let (budget_enabled, _, _) = gate.budget_params();
+        let tripped = budget_enabled && self.budget_tripped(session_id);
+
+        let verdict = if tripped {
+            crate::models::PolicyVerdict {
+                rule_id: Some(BUDGET_RULE_ID.to_string()),
+                action: PolicyAction::Hold,
+                reason: "会话 token 预算已熔断,新命令需人工确认".to_string(),
+                matched: true,
+            }
+        } else {
+            gate.evaluate(&command_line)
+        };
+
+        match verdict.action {
+            PolicyAction::Allow => self.send_input_raw(db, app, session_id, text),
+            PolicyAction::Warn => {
+                self.send_input_raw(db, app, session_id, text)?;
+                let rule = verdict.rule_id.clone().unwrap_or_default();
+                self.record_decision(
+                    db,
+                    app,
+                    Some(session_id),
+                    Some(&task_id),
+                    &rule,
+                    PolicyAction::Warn,
+                    PolicyVerdictKind::Warned,
+                    &command_line,
+                    &verdict.reason,
+                    DecidedBy::Policy,
+                    true,
+                )?;
+                let _ = self.push_system_chunk(
+                    db,
+                    app,
+                    session_id,
+                    &format!("[AEL·海关] 警告(规则 {rule}):{} · 已放行并留痕\r\n", verdict.reason),
+                );
+                Ok(())
+            }
+            PolicyAction::Hold => {
+                let rule = verdict.rule_id.clone().unwrap_or_default();
+                let pending = self.enqueue_hold(
+                    session_id,
+                    &task_id,
+                    &text,
+                    &rule,
+                    &verdict.reason,
+                    gate.hold_timeout_secs(),
+                );
+                let _ = self.push_system_chunk(
+                    db,
+                    app,
+                    session_id,
+                    &format!(
+                        "[AEL·海关] 命令已扣留待裁决(规则 {rule}):{} — 请在裁决线上放行或拦截\r\n",
+                        verdict.reason
+                    ),
+                );
+                let _ = app.emit(GATE_PENDING_EVENT, &pending);
+                self.spawn_hold_timeout(app.clone(), pending.id.clone(), gate.hold_timeout_secs());
+                Ok(())
+            }
+            PolicyAction::Deny => {
+                let rule = verdict.rule_id.clone().unwrap_or_default();
+                self.record_decision(
+                    db,
+                    app,
+                    Some(session_id),
+                    Some(&task_id),
+                    &rule,
+                    PolicyAction::Deny,
+                    PolicyVerdictKind::AutoDenied,
+                    &command_line,
+                    &verdict.reason,
+                    DecidedBy::Policy,
+                    true,
+                )?;
+                let _ = self.push_system_chunk(
+                    db,
+                    app,
+                    session_id,
+                    &format!("[AEL·海关] 命令已拦截(规则 {rule}):{}\r\n", verdict.reason),
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// 原始输入:直接写 PTY + 记 input chunk。不经海关(内部注入 / 人工放行后写入用)。
+    pub fn send_input_raw(
         &self,
         db: &Db,
         app: &AppHandle,
@@ -461,9 +625,10 @@ impl AgentRuntime {
                 .ok_or_else(|| AelError::not_found(format!("session {session_id} 不存在")))?;
             session.writer.write_all(text.as_bytes())?;
             session.writer.flush()?;
+            session.input_chars += text.chars().count() as u64;
             make_chunk(session, TerminalDirection::Input, text)
         };
-        db.append_terminal_chunk(&chunk)?;
+        self.persist_chunk(db, app, &chunk);
         emit_chunk(app, session_id, chunk);
         Ok(())
     }
@@ -531,33 +696,123 @@ impl AgentRuntime {
         db.list_terminal_chunks(session_id, after_seq)
     }
 
-    fn push_output_chunk(
+    // ── 海关:扣留队列 / 人工裁决 ────────────────────────────────
+
+    /// 列出当前所有待裁决命令。
+    pub fn list_pending(&self) -> Vec<PendingCommand> {
+        let pending = self.pending.lock().expect("pending mutex poisoned");
+        pending
+            .iter()
+            .map(|(id, h)| PendingCommand {
+                id: id.clone(),
+                session_id: h.session_id.clone(),
+                task_id: h.task_id.clone(),
+                command_text: h.text.trim().to_string(),
+                rule_id: h.rule_id.clone(),
+                reason: h.reason.clone(),
+                created_at: h.created_at.clone(),
+                timeout_secs: 0,
+            })
+            .collect()
+    }
+
+    /// 人工在裁决线上放行 / 拦截。
+    pub fn resolve_pending(
         &self,
         db: &Db,
         app: &AppHandle,
-        session_id: &str,
-        text: String,
-    ) -> String {
+        pending_id: &str,
+        approve: bool,
+    ) -> AelResult<PolicyDecision> {
+        let hold = {
+            let mut pending = self.pending.lock().expect("pending mutex poisoned");
+            pending.remove(pending_id)
+        }
+        .ok_or_else(|| AelError::not_found(format!("待裁决命令 {pending_id} 不存在或已处理")))?;
+
+        let command_line = hold.text.trim().to_string();
+        if approve {
+            self.send_input_raw(db, app, &hold.session_id, hold.text.clone())?;
+            let d = self.record_decision(
+                db,
+                app,
+                Some(&hold.session_id),
+                Some(&hold.task_id),
+                &hold.rule_id,
+                PolicyAction::Hold,
+                PolicyVerdictKind::Approved,
+                &command_line,
+                &hold.reason,
+                DecidedBy::Human,
+                true,
+            )?;
+            let _ = self.push_system_chunk(
+                db,
+                app,
+                &hold.session_id,
+                "[AEL·海关] 人工放行 · 已留痕\r\n",
+            );
+            Ok(d)
+        } else {
+            let d = self.record_decision(
+                db,
+                app,
+                Some(&hold.session_id),
+                Some(&hold.task_id),
+                &hold.rule_id,
+                PolicyAction::Hold,
+                PolicyVerdictKind::Denied,
+                &command_line,
+                &hold.reason,
+                DecidedBy::Human,
+                true,
+            )?;
+            let _ = self.push_system_chunk(
+                db,
+                app,
+                &hold.session_id,
+                "[AEL·海关] 人工拦截 · 命令未进入 Shell,签名入库\r\n",
+            );
+            Ok(d)
+        }
+    }
+
+    /// 会话当前预算状态(供 UI 主动查询)。
+    pub fn budget_status(&self, db: &Db, gate: &PolicyGate, session_id: &str) -> AelResult<BudgetStatus> {
+        let (enabled, max_tokens, _) = gate.budget_params();
+        let used = self.session_used_tokens(db, session_id);
+        let ratio = if max_tokens > 0 {
+            used as f64 / max_tokens as f64
+        } else {
+            0.0
+        };
+        Ok(BudgetStatus {
+            enabled,
+            max_session_tokens: max_tokens,
+            used_tokens: used,
+            ratio,
+            breaker_tripped: enabled && used >= max_tokens,
+        })
+    }
+
+    // ── 内部:输出处理 ──────────────────────────────────────────
+
+    fn push_output_chunk(&self, db: &Db, app: &AppHandle, session_id: &str, text: String) -> String {
         let (chunk, completed_lines) = {
             let mut sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
             let Some(session) = sessions.get_mut(session_id) else {
                 return String::new();
             };
+            session.output_chars += text.chars().count() as u64;
             let chunk = make_chunk(session, TerminalDirection::Output, text.clone());
             let clean = strip_ansi(&text);
             session.pending_output.push_str(&clean);
             let completed = take_completed_lines(&mut session.pending_output);
             (chunk, completed)
         };
-        if let Err(error) = db.append_terminal_chunk(&chunk) {
-            let _ = self.push_system_chunk(
-                db,
-                app,
-                session_id,
-                &format!("AEL transcript persist failed: {error}\r\n"),
-            );
-        }
+        self.persist_chunk(db, app, &chunk);
         emit_chunk(app, session_id, chunk);
+        self.check_budget(app, session_id);
         completed_lines
     }
 
@@ -575,9 +830,38 @@ impl AgentRuntime {
                 .ok_or_else(|| AelError::not_found(format!("session {session_id} 不存在")))?;
             make_chunk(session, TerminalDirection::System, text.to_string())
         };
-        db.append_terminal_chunk(&chunk)?;
+        self.persist_chunk(db, app, &chunk);
         emit_chunk(app, session_id, chunk);
         Ok(())
+    }
+
+    /// 落库前脱敏(前端 emit 的仍是原文)。
+    fn persist_chunk(&self, db: &Db, app: &AppHandle, chunk: &TerminalChunk) {
+        let redact_on = app
+            .try_state::<crate::state::AppState>()
+            .map(|s| s.gate.redaction_enabled())
+            .unwrap_or(true);
+        let to_store = if redact_on {
+            TerminalChunk {
+                text: redact::redact(&chunk.text),
+                ..chunk.clone()
+            }
+        } else {
+            chunk.clone()
+        };
+        if let Err(error) = db.append_terminal_chunk(&to_store) {
+            let mut sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
+            if let Some(session) = sessions.get_mut(chunk.session_id.as_str()) {
+                let warn = make_chunk(
+                    session,
+                    TerminalDirection::System,
+                    format!("AEL transcript persist failed: {error}\r\n"),
+                );
+                drop(sessions);
+                let _ = db.append_terminal_chunk(&warn);
+                emit_chunk(app, &chunk.session_id, warn);
+            }
+        }
     }
 
     fn ingest_completed_lines(&self, app: &AppHandle, session_id: &str, lines: &str) {
@@ -597,17 +881,19 @@ impl AgentRuntime {
         }
 
         let state = app.state::<crate::state::AppState>();
-        match adapter::ingest(&state.db, &task_id, &agent_id, lines) {
+        match adapter::ingest(&state.db, &task_id, &agent_id, Some(session_id), lines) {
             Ok(events) => {
-                for event in events {
+                for event in &events {
                     let _ = app.emit(
                         PARSED_EVENT_EVENT,
                         ParsedEventPayload {
                             session_id: session_id.to_string(),
-                            event,
+                            event: event.clone(),
                         },
                     );
                 }
+                // 事中签名命中:对新入库的 error 事件查失败库。
+                self.scan_signature_hits(&state.db, app, session_id, &events);
             }
             Err(error) => {
                 let _ = self.push_system_chunk(
@@ -618,6 +904,230 @@ impl AgentRuntime {
                 );
             }
         }
+    }
+
+    /// 输出流上的历史失败签名命中 → 事中预警(不打断 Agent,只提示 + 留痕)。
+    fn scan_signature_hits(&self, db: &Db, app: &AppHandle, session_id: &str, events: &[TaskEvent]) {
+        for ev in events {
+            if ev.kind != crate::models::EventKind::Error {
+                continue;
+            }
+            let text = match &ev.detail {
+                Some(d) if !d.trim().is_empty() => format!("{}\n{}", ev.summary, d),
+                _ => ev.summary.clone(),
+            };
+            let (_, signature) = normalize::normalize_and_sign(&text);
+            if let Ok(Some(failure)) = db.find_failure_by_signature(&signature) {
+                let _ = app.emit(
+                    SIGNATURE_HIT_EVENT,
+                    SignatureHitPayload {
+                        session_id: session_id.to_string(),
+                        signature: signature.clone(),
+                        guard_rule: failure.guard_rule.clone(),
+                        occurrences: failure.occurrences,
+                        line: ev.summary.clone(),
+                    },
+                );
+                let _ = self.push_system_chunk(
+                    db,
+                    app,
+                    session_id,
+                    &format!(
+                        "[AEL·护栏] 签名命中失败库(历史 {} 次):{}\r\n",
+                        failure.occurrences, failure.guard_rule
+                    ),
+                );
+            }
+        }
+    }
+
+    // ── 预算熔断 ────────────────────────────────────────────────
+
+    fn check_budget(&self, app: &AppHandle, session_id: &str) {
+        let Some(state) = app.try_state::<crate::state::AppState>() else {
+            return;
+        };
+        let (enabled, max_tokens, warn_ratio) = state.gate.budget_params();
+        if !enabled || max_tokens == 0 {
+            return;
+        }
+        let (used, new_phase, changed) = {
+            let mut sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
+            let Some(session) = sessions.get_mut(session_id) else {
+                return;
+            };
+            let used = (session.input_chars + session.output_chars) / 4;
+            let ratio = used as f64 / max_tokens as f64;
+            let phase = if ratio >= 1.0 {
+                BudgetPhase::Tripped
+            } else if ratio >= warn_ratio {
+                BudgetPhase::Warned
+            } else {
+                BudgetPhase::Normal
+            };
+            let changed = phase != session.budget_phase;
+            session.budget_phase = phase;
+            (used, phase, changed)
+        };
+        if !changed {
+            return;
+        }
+        let _ = app.emit(
+            GATE_BUDGET_EVENT,
+            BudgetPayload {
+                session_id: session_id.to_string(),
+                budget: BudgetStatus {
+                    enabled,
+                    max_session_tokens: max_tokens,
+                    used_tokens: used,
+                    ratio: used as f64 / max_tokens as f64,
+                    breaker_tripped: new_phase == BudgetPhase::Tripped,
+                },
+            },
+        );
+        if new_phase == BudgetPhase::Tripped {
+            let _ = self.push_system_chunk(
+                &state.db,
+                app,
+                session_id,
+                "[AEL·海关] 会话 token 预算已熔断 —— 后续命令需人工确认放行\r\n",
+            );
+        }
+    }
+
+    fn budget_tripped(&self, session_id: &str) -> bool {
+        let sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
+        sessions
+            .get(session_id)
+            .map(|s| s.budget_phase == BudgetPhase::Tripped)
+            .unwrap_or(false)
+    }
+
+    fn session_used_tokens(&self, db: &Db, session_id: &str) -> u64 {
+        {
+            let sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
+            if let Some(s) = sessions.get(session_id) {
+                return (s.input_chars + s.output_chars) / 4;
+            }
+        }
+        // 会话已退出:退回按 transcript 估算。
+        usage::session_token_usage(db, session_id)
+            .map(|u| u.total_tokens)
+            .unwrap_or(0)
+    }
+
+    // ── 海关账本 ────────────────────────────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_decision(
+        &self,
+        db: &Db,
+        app: &AppHandle,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
+        rule_id: &str,
+        action: PolicyAction,
+        verdict: PolicyVerdictKind,
+        command_text: &str,
+        reason: &str,
+        decided_by: DecidedBy,
+        resolved: bool,
+    ) -> AelResult<PolicyDecision> {
+        let decision = db.insert_policy_decision(NewPolicyDecision {
+            session_id: session_id.map(|s| s.to_string()),
+            task_id: task_id.map(|s| s.to_string()),
+            rule_id: rule_id.to_string(),
+            action,
+            verdict,
+            command_text: command_text.to_string(),
+            reason: reason.to_string(),
+            decided_by,
+            resolved_at: if resolved { Some(now_iso()) } else { None },
+        })?;
+        let _ = app.emit(GATE_DECISION_EVENT, &decision);
+        Ok(decision)
+    }
+
+    fn enqueue_hold(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        text: &str,
+        rule_id: &str,
+        reason: &str,
+        timeout_secs: u64,
+    ) -> PendingCommand {
+        let id = Uuid::new_v4().to_string();
+        let created_at = now_iso();
+        let mut pending = self.pending.lock().expect("pending mutex poisoned");
+        pending.insert(
+            id.clone(),
+            PendingHold {
+                session_id: session_id.to_string(),
+                task_id: task_id.to_string(),
+                text: text.to_string(),
+                rule_id: rule_id.to_string(),
+                reason: reason.to_string(),
+                created_at: created_at.clone(),
+            },
+        );
+        PendingCommand {
+            id,
+            session_id: session_id.to_string(),
+            task_id: task_id.to_string(),
+            command_text: text.trim().to_string(),
+            rule_id: rule_id.to_string(),
+            reason: reason.to_string(),
+            created_at,
+            timeout_secs,
+        }
+    }
+
+    /// 超时未裁决 → 默认拦截(auto_denied)。
+    fn spawn_hold_timeout(&self, app: AppHandle, pending_id: String, timeout_secs: u64) {
+        if timeout_secs == 0 {
+            return; // 0 = 永不超时
+        }
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_secs(timeout_secs));
+            let Some(state) = app.try_state::<crate::state::AppState>() else {
+                return;
+            };
+            let hold = {
+                let mut pending = state.agents.pending.lock().expect("pending mutex poisoned");
+                pending.remove(&pending_id)
+            };
+            if let Some(hold) = hold {
+                let command_line = hold.text.trim().to_string();
+                let _ = state.agents.record_decision(
+                    &state.db,
+                    &app,
+                    Some(&hold.session_id),
+                    Some(&hold.task_id),
+                    &hold.rule_id,
+                    PolicyAction::Hold,
+                    PolicyVerdictKind::AutoDenied,
+                    &command_line,
+                    &hold.reason,
+                    DecidedBy::Policy,
+                    true,
+                );
+                let _ = state.agents.push_system_chunk(
+                    &state.db,
+                    &app,
+                    &hold.session_id,
+                    "[AEL·海关] 扣留超时,默认拦截\r\n",
+                );
+            }
+        });
+    }
+
+    fn session_task_id(&self, session_id: &str) -> AelResult<String> {
+        let sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
+        sessions
+            .get(session_id)
+            .map(|s| s.session.task_id.clone())
+            .ok_or_else(|| AelError::not_found(format!("session {session_id} 不存在")))
     }
 
     fn mark_session_status(
@@ -637,9 +1147,7 @@ impl AgentRuntime {
             session.session.updated_at = now_iso();
             if matches!(
                 session.session.status,
-                AgentSessionStatus::Exited
-                    | AgentSessionStatus::Killed
-                    | AgentSessionStatus::Failed
+                AgentSessionStatus::Exited | AgentSessionStatus::Killed | AgentSessionStatus::Failed
             ) {
                 session.session.ended_at = Some(session.session.updated_at.clone());
                 session.session.exit_code = exit_code;
@@ -718,11 +1226,7 @@ fn builtin_specs() -> Vec<AgentSpec> {
         display_name: "PowerShell",
         executable: "powershell.exe",
         default_args: &["-NoLogo"],
-        version_args: &[
-            "-NoLogo",
-            "-Command",
-            "$PSVersionTable.PSVersion.ToString()",
-        ],
+        version_args: &["-NoLogo", "-Command", "$PSVersionTable.PSVersion.ToString()"],
     });
 
     #[cfg(not(windows))]
@@ -748,11 +1252,7 @@ fn profile_from_spec(spec: AgentSpec) -> AgentProfile {
         kind: spec.kind.to_string(),
         display_name: spec.display_name.to_string(),
         executable: spec.executable.to_string(),
-        default_args: spec
-            .default_args
-            .iter()
-            .map(|arg| arg.to_string())
-            .collect(),
+        default_args: spec.default_args.iter().map(|arg| arg.to_string()).collect(),
         available: path.is_some(),
         version,
         path: path.map(|p| p.to_string_lossy().to_string()),
@@ -803,11 +1303,7 @@ fn render_command_line(executable: &Path, args: &[String]) -> String {
     parts.join(" ")
 }
 
-fn make_chunk(
-    session: &mut RuntimeSession,
-    direction: TerminalDirection,
-    text: String,
-) -> TerminalChunk {
+fn make_chunk(session: &mut RuntimeSession, direction: TerminalDirection, text: String) -> TerminalChunk {
     session.session.last_seq += 1;
     session.session.updated_at = now_iso();
     let chunk = TerminalChunk {
@@ -846,7 +1342,7 @@ fn strip_ansi(input: &str) -> String {
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' {
-            while let Some(next) = chars.next() {
+            for next in chars.by_ref() {
                 if next.is_ascii_alphabetic() || next == '~' {
                     break;
                 }
