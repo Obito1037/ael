@@ -278,6 +278,59 @@ export interface AgentProfile {
   path?: string;
 }
 
+// ── Agent 配置中心（借鉴 CC Switch 的统一配置模型）────────────
+
+export type ProviderTargetApp = "claude" | "codex" | "gemini" | "universal";
+
+export interface ProviderConfig {
+  id: string;
+  name: string;
+  targetApp: ProviderTargetApp;
+  model: string;
+  endpoint: string;
+  apiKey: string;
+  isActive: boolean;
+  notes?: string;
+}
+
+export interface TestProviderResult {
+  success: boolean;
+  message: string;
+}
+
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  isActive: boolean;
+}
+
+export type AgentConfigTargetType = "native_config" | "project_context";
+export type AgentConfigFormat = "json" | "toml" | "markdown";
+
+export interface AgentConfigTarget {
+  id: string;
+  agentId: string;
+  targetType: AgentConfigTargetType;
+  format: AgentConfigFormat;
+  path: string;
+  exists: boolean;
+  description: string;
+}
+
+export interface AgentConfigContent {
+  target: AgentConfigTarget;
+  content: string;
+}
+
+export interface AgentConfigWriteResult {
+  target: AgentConfigTarget;
+  backupPath?: string | null;
+  bytesWritten: number;
+}
+
 export interface AgentSession {
   id: string;
   taskId: string;
@@ -359,6 +412,7 @@ export type ViewId =
   | "overview"
   | "tasks"
   | "console"
+  | "agents"
   | "gate"
   | "briefs"
   | "blame"

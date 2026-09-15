@@ -20,19 +20,31 @@ module.exports = {
         red: withVar("--c-red"),
         blue: withVar("--c-blue"),
         amber: withVar("--c-amber"),
+        line: withVar("--c-line"),
+        muted: withVar("--c-muted"),
       },
       fontFamily: {
-        sans: ['"Noto Sans SC"', '"PingFang SC"', '"Microsoft YaHei"', "sans-serif"],
-        mono: ['"JetBrains Mono"', "ui-monospace", "Consolas", "monospace"],
-        display: ['"Space Grotesk"', '"Noto Sans SC"', "sans-serif"],
+        sans: [
+          "-apple-system",
+          "BlinkMacSystemFont",
+          '"Segoe UI Variable"',
+          '"Segoe UI"',
+          '"PingFang SC"',
+          '"Microsoft YaHei UI"',
+          '"Noto Sans SC"',
+          "sans-serif",
+        ],
+        mono: ['"Cascadia Code"', '"SFMono-Regular"', '"JetBrains Mono"', "Consolas", "ui-monospace", "monospace"],
+        display: ['"Songti SC"', '"STSong"', '"Noto Serif SC"', "Georgia", "serif"],
+        serif: ['"Songti SC"', '"STSong"', '"Noto Serif SC"', "Georgia", "serif"],
       },
       borderRadius: {
-        xl: "14px",
-        lg: "11px",
+        xl: "18px",
+        lg: "13px",
       },
       keyframes: {
         "fade-in": {
-          from: { opacity: "0", transform: "translateY(8px)" },
+          from: { opacity: "0", transform: "translateY(6px)" },
           to: { opacity: "1", transform: "none" },
         },
         blink: {
@@ -41,7 +53,7 @@ module.exports = {
         },
       },
       animation: {
-        "fade-in": "fade-in 0.4s cubic-bezier(0.22,1,0.36,1)",
+        "fade-in": "fade-in 0.28s cubic-bezier(0.22,1,0.36,1)",
         blink: "blink 1.2s ease-in-out infinite",
       },
     },

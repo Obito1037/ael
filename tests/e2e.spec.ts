@@ -1,37 +1,69 @@
-import { test, expect } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
-// 浏览器预览(内置 mock)下的治理层 UI 冒烟测试。
-// 需要先起 dev server:pnpm dev(http://localhost:1420)。
+async function navigate(page: import("@playwright/test").Page, label: string) {
+  await page.getByRole("button", { name: "打开导航" }).click();
+  const drawer = page.locator("aside.nav-drawer");
+  await expect(drawer).toBeVisible();
+  await drawer.getByRole("button", { name: new RegExp(`^${label}`) }).first().click();
+}
 
-test("治理层导航与四出口渲染", async ({ page }) => {
+// 浏览器预览使用内置 mock，覆盖新信息架构的关键前端闭环。
+test("暖纸工作台、记忆治理与原有业务出口可用", async ({ page }) => {
   await page.goto("/");
 
-  // 侧栏与总览
-  await expect(page.locator("aside")).toContainText("AEL");
-  await expect(page.locator("main h1")).toHaveText("总览");
+  await expect(page.getByRole("button", { name: "AEL" })).toBeVisible();
+  await expect(page.locator("main h1")).toHaveText("开始一件事");
 
-  // 出口③ 海关:命令试判器
-  await page.click('aside button:has-text("海关")');
-  await expect(page.locator("main h1")).toHaveText("海关裁决");
+  // 新任务先审阅将被复用的记忆，不静默创建。
+  await page.locator("main textarea").first().fill("修复 Windows 构建失败，并复用已经验证的路径处理经验");
+  await page.getByRole("button", { name: "创建任务" }).click();
+  await expect(page.getByRole("heading", { name: "这次带上什么" })).toBeVisible();
+  await expect(page.getByText(/本次带上/).first()).toBeVisible();
+  await page.getByRole("button", { name: "关闭" }).click();
+
+  // 记忆页提供待确认、健康和可逆遗忘入口。
+  await navigate(page, "记忆");
+  await expect(page.locator("main h1")).toHaveText("记忆");
+  await expect(page.getByRole("button", { name: /待确认/ })).toBeVisible();
+  await page.getByRole("button", { name: /健康与遗忘/ }).click();
+  await expect(page.locator("main")).toContainText("需要处理");
+  await expect(page.locator("main")).toContainText("已停止召回");
+
+  // 安全：命令试判仍走原有策略引擎。
+  await navigate(page, "安全");
+  await expect(page.locator("main h1")).toHaveText("安全");
   const probe = page.getByPlaceholder("输入一条命令,预演海关裁决…");
   await probe.fill("rm -rf /");
-  await page.click('main button:has-text("试判")');
+  await page.getByRole("button", { name: "试判" }).click();
   await expect(page.locator("main")).toContainText("扣留");
   await expect(page.locator("main")).toContainText("destructive_fs");
 
-  // 出口① Review Brief
-  await page.click('aside button:has-text("Review Brief")');
-  await expect(page.locator("main h1")).toHaveText("Review Brief");
+  // 任务沉淀能力仍然可达。
+  await navigate(page, "Review");
+  await expect(page.locator("main h1")).toHaveText("Review");
 
-  // 出口② 行级溯源
-  await page.click('aside button:has-text("行级溯源")');
-  await expect(page.locator("main h1")).toHaveText("行级溯源");
+  await navigate(page, "来源链");
+  await expect(page.locator("main h1")).toHaveText("来源链");
 
-  // 出口④ 活文档 ADR
-  await page.click('aside button:has-text("活文档")');
-  await expect(page.locator("main h1")).toHaveText("活文档 ADR");
+  await navigate(page, "决策");
+  await expect(page.locator("main h1")).toHaveText("决策");
 
-  // 经验库(保鲜期)
-  await page.click('aside button:has-text("经验库")');
-  await expect(page.locator("main")).toContainText("保鲜");
+  await navigate(page, "工作台");
+  await expect(page.locator("header")).toContainText("修复 Windows 构建失败");
+  await expect(page.locator("main")).toContainText("启动 Agent");
+
+  // CC Switch 补充能力已成为可操作页面，而不是隐藏 IPC。
+  await navigate(page, "Agent 中心");
+  await expect(page.locator("main h1")).toHaveText("Agent 中心");
+  await expect(page.locator("main")).toContainText("OpenAI Official");
+  await page.getByRole("button", { name: "配置文件" }).click();
+  await page.locator("main button").filter({ hasText: "~/.codex/config.toml" }).click();
+  await expect(page.locator("main")).toContainText("Codex global config.toml");
+
+  await navigate(page, "任务历史");
+  await expect(page.locator("main h1")).toHaveText("任务");
+
+  await navigate(page, "设置");
+  await expect(page.locator("main h1")).toHaveText("设置");
+  await expect(page.locator("main")).toContainText("本地数据");
 });

@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import * as mock from "./mock";
 import type {
   AdrRecord,
+  AgentConfigContent,
+  AgentConfigTarget,
+  AgentConfigWriteResult,
   AgentProfile,
   AgentRecommendation,
   AgentSession,
@@ -13,9 +16,11 @@ import type {
   FinalizeResult,
   GuardResult,
   PendingCommand,
+  McpServerConfig,
   PolicyDecision,
   PolicyVerdict,
   RankedSkill,
+  ProviderConfig,
   ReviewBrief,
   Settings,
   Skill,
@@ -24,6 +29,7 @@ import type {
   TaskEvent,
   TaskStatus,
   TerminalChunk,
+  TestProviderResult,
   WorkspaceLock,
 } from "../types";
 
@@ -173,11 +179,33 @@ export const ipc = {
     manualNote?: string;
   }) => call<any>("build_agent_startup_context", a, () => mock.buildStartupContext(a)),
 
+  // ── Agent 配置中心（CC Switch 互补层）───────────────
+  listProviders: () => call<ProviderConfig[]>("list_providers", {}, () => mock.listProviders()),
+  saveProvider: (provider: ProviderConfig) =>
+    call<void>("save_provider", { provider }, () => mock.saveProvider(provider)),
+  testProvider: (providerId: string) =>
+    call<TestProviderResult>("test_provider", { providerId }, () => mock.testProvider(providerId)),
+  listMcpServers: () => call<McpServerConfig[]>("list_mcp_servers", {}, () => mock.listMcpServers()),
+  saveMcpServer: (server: McpServerConfig) =>
+    call<void>("save_mcp_server", { server }, () => mock.saveMcpServer(server)),
+  listAgentConfigTargets: (cwd?: string) =>
+    call<AgentConfigTarget[]>("list_agent_config_targets", { cwd }, () => mock.listAgentConfigTargets(cwd)),
+  readAgentConfigTarget: (targetId: string, cwd?: string) =>
+    call<AgentConfigContent>("read_agent_config_target", { targetId, cwd }, () => mock.readAgentConfigTarget(targetId)),
+  writeAgentConfigTarget: (targetId: string, content: string, cwd?: string, createBackup = true) =>
+    call<AgentConfigWriteResult>("write_agent_config_target", { targetId, content, cwd, createBackup }, () =>
+      mock.writeAgentConfigTarget(targetId, content),
+    ),
+  backupAgentConfigTarget: (targetId: string, cwd?: string) =>
+    call<string | null>("backup_agent_config_target", { targetId, cwd }, () => mock.backupAgentConfigTarget(targetId)),
+
   // ── 设置 ─────────────────────────────────────────────
   getSettings: () => call<Settings>("get_settings", {}, () => mock.SETTINGS),
   setSettings: (a: Partial<Settings>) =>
     call<Settings>("set_settings", a, () => mock.setSettings(a)),
   backupNow: () => call<{ path: string }>("backup_now", {}, () => ({ path: "~/.ael/backups/ael-now.db" })),
+  exportHandover: (taskId: string, include?: { events?: boolean; skills?: boolean; failures?: boolean; openQuestions?: string[] }) =>
+    call<{ path: string }>("export_handover", { taskId, include }, () => ({ path: `~/.ael/handovers/${taskId}.zip` })),
 };
 
 export type Ipc = typeof ipc;

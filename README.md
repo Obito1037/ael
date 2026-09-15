@@ -15,13 +15,15 @@ AEL 是一个 Tauri 2 桌面应用。1.0 的经验层内核(PTY 执行 → 证�
 
 横向机制:经验保鲜期(模型换代自动降级待重验)、经验驱动智能路由、AHP 接手包开放标准。
 
+新增 **Agent 中心**：统一管理 Codex / Claude Code / Gemini 的 Provider、固定目标配置文件与 MCP Server。配置文件保存默认先备份，再通过同目录临时文件原子替换；Windows 覆盖逻辑改编自 MIT 许可的 [CC Switch](https://github.com/farion1231/cc-switch)，完整声明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。AEL 仍把“高效复用正确记忆、可逆遗忘错误与无关信息”作为主线，Agent 配置只是可替换的连接层。
+
 ## 架构
 
 ```
 前端(React 19 + Tailwind + xterm) ── Tauri IPC ──> 后端(Rust)
-  石墨底 + 记录仪橙                                  ├─ agent/   PTY 运行时 + 海关接线
-  九个视图:总览/任务/控制台/海关/                   ├─ engine/  policy·redact·brief·adr·blame·route·freshness
-  Brief/溯源/经验库/ADR/设置                          │           + guard·finalize·search·normalize(1.0)
+  暖纸画布 + 克制珊瑚橙                              ├─ agent/   PTY 运行时 + 海关接线 + 固定目标配置
+  十个视图:新任务/工作台/记忆/Agent 中心/任务/      ├─ engine/  policy·redact·brief·adr·blame·route·freshness
+  海关/Brief/溯源/ADR/设置                            │           + guard·finalize·search·normalize(1.0)
                                                      ├─ db/      SQLite(schema v4)
                                                      └─ handover/ AHP v1 接手包
 ```

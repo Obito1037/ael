@@ -10,17 +10,17 @@ const icon: Record<ToastKind, any> = {
   error: XCircle,
 };
 const tone: Record<ToastKind, string> = {
-  info: "text-blue border-blue/30",
-  success: "text-green border-green/30",
-  warning: "text-orange border-orange/40",
-  error: "text-red border-red/40",
+  info: "text-blue",
+  success: "text-green",
+  warning: "text-orange",
+  error: "text-red",
 };
 
 export function Toasts() {
   const toasts = useStore((s) => s.toasts);
   const dismiss = useStore((s) => s.dismissToast);
   return (
-    <div className="pointer-events-none fixed bottom-5 right-5 z-[60] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
+    <div className="pointer-events-none fixed left-1/2 top-5 z-[60] flex w-[390px] max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col gap-2">
       {toasts.map((t) => {
         const Icon = icon[t.kind];
         return (
@@ -28,7 +28,7 @@ export function Toasts() {
             key={t.id}
             onClick={() => dismiss(t.id)}
             className={cx(
-              "pointer-events-auto flex items-start gap-3 rounded-xl border bg-panel/95 px-4 py-3 text-left text-[13px] text-ink/85 shadow-2xl backdrop-blur animate-slide-down",
+              "glass-surface pointer-events-auto flex items-start gap-3 rounded-[18px] px-4 py-3 text-left text-[12.5px] text-ink/80 animate-slide-down",
               tone[t.kind],
             )}
           >

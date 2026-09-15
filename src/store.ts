@@ -96,7 +96,8 @@ export const useStore = create<AppState>((set) => ({
   setPending: (pending) => set({ pending }),
 
   decisions: [],
-  addDecision: (d) => set((s) => ({ decisions: [d, ...s.decisions].slice(0, 500) })),
+  addDecision: (d) =>
+    set((s) => ({ decisions: [d, ...s.decisions.filter((item) => item.id !== d.id)].slice(0, 500) })),
   setDecisions: (decisions) => set({ decisions }),
 
   budgets: {},

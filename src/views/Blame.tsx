@@ -109,9 +109,9 @@ export function Blame() {
 
   return (
     <div>
-      <Kicker badge="出口 ②">Agent Blame · 任意一行代码,3 秒追到决策现场</Kicker>
-      <PageTitle sub="git blame 只告诉你谁改的;AEL 告诉你为什么这么改 —— 从代码行反查提交、任务、决策链与活文档。">
-        行级溯源
+      <Kicker badge="行级溯源">提交、任务、会话与决策</Kicker>
+      <PageTitle sub="从一行代码回到它的提交、任务、Agent 会话和人工确认。">
+        来源链
       </PageTitle>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">

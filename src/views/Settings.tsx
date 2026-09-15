@@ -1,260 +1,202 @@
-import { useEffect, useState } from "react";
-import { Check, DatabaseBackup, HardDriveDownload, RefreshCw, Save, Terminal } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import {
+  Bot,
+  Check,
+  ChevronRight,
+  Database,
+  DatabaseBackup,
+  FolderOpen,
+  HardDrive,
+  Palette,
+  RefreshCw,
+  Save,
+  Search,
+  ShieldCheck,
+} from "lucide-react";
 import { useStore } from "../store";
 import { ipc } from "../lib/ipc";
 import { cx } from "../lib/format";
 import { THEMES } from "../themes";
-import { Badge, Button, Field, Kicker, PageTitle, Panel, Spinner, inputCls } from "../ui";
+import { Badge, Button, PageTitle, Panel, Spinner, inputCls } from "../ui";
 import type { AgentProfile, RetrievalMode, Settings } from "../types";
 
+type SettingsSection = "general" | "memory" | "agents" | "safety";
+
 const RETRIEVAL_LABEL: Record<RetrievalMode, string> = {
-  keyword: "关键词(BM25)",
-  hybrid: "混合(关键词 + 语义)",
+  keyword: "关键词",
+  hybrid: "混合（关键词 + 向量）",
 };
 
-export function SettingsView() {
-  const toast = useStore((s) => s.toast);
-  const theme = useStore((s) => s.theme);
-  const setTheme = useStore((s) => s.setTheme);
+function SettingRow({ icon, label, hint, children }: { icon: ReactNode; label: string; hint?: string; children: ReactNode }) {
+  return (
+    <div className="grid min-h-[58px] grid-cols-[24px_minmax(150px,1fr)_minmax(220px,1.2fr)] items-center gap-3 border-b border-line px-4 py-2.5 last:border-b-0">
+      <span className="text-ink/34">{icon}</span>
+      <span><span className="block text-[11.5px] text-ink/66">{label}</span>{hint && <span className="block text-[9.5px] text-ink/30">{hint}</span>}</span>
+      <div className="min-w-0">{children}</div>
+    </div>
+  );
+}
 
+export function SettingsView() {
+  const toast = useStore((state) => state.toast);
+  const theme = useStore((state) => state.theme);
+  const setTheme = useStore((state) => state.setTheme);
+  const tasks = useStore((state) => state.tasks);
+  const [section, setSection] = useState<SettingsSection>("general");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [form, setForm] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
   const [backing, setBacking] = useState(false);
-
   const [agents, setAgents] = useState<AgentProfile[]>([]);
   const [detecting, setDetecting] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
-    ipc
-      .getSettings()
-      .then((s) => {
-        setSettings(s);
-        setForm(s);
-      })
-      .catch(() => toast("读取设置失败。", "error"));
-    detect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    ipc.getSettings().then((next) => { setSettings(next); setForm(next); }).catch(() => toast("读取设置失败。", "error"));
+    void detect();
   }, []);
 
   const detect = async () => {
     setDetecting(true);
-    try {
-      setAgents(await ipc.detectAgents());
-    } catch {
-      toast("探测 Agent 失败。", "error");
-    } finally {
-      setDetecting(false);
-    }
+    try { setAgents(await ipc.detectAgents()); }
+    catch { toast("探测 Agent 失败。", "error"); }
+    finally { setDetecting(false); }
   };
 
-  const patch = <K extends keyof Settings>(key: K, value: Settings[K]) =>
-    setForm((f) => (f ? { ...f, [key]: value } : f));
-
-  const dirty =
-    !!form &&
-    !!settings &&
-    (form.dataDir !== settings.dataDir ||
-      form.maxBackups !== settings.maxBackups ||
-      form.retrievalMode !== settings.retrievalMode ||
-      form.guardMinScore !== settings.guardMinScore);
+  const patch = <K extends keyof Settings>(key: K, value: Settings[K]) => setForm((current) => current ? { ...current, [key]: value } : current);
+  const dirty = !!form && !!settings && (form.dataDir !== settings.dataDir || form.maxBackups !== settings.maxBackups || form.retrievalMode !== settings.retrievalMode || form.guardMinScore !== settings.guardMinScore);
 
   const save = async () => {
     if (!form) return;
     setSaving(true);
     try {
-      const next = await ipc.setSettings({
-        dataDir: form.dataDir,
-        maxBackups: form.maxBackups,
-        retrievalMode: form.retrievalMode,
-        guardMinScore: form.guardMinScore,
-      });
+      const next = await ipc.setSettings(form);
       setSettings(next);
       setForm(next);
       toast("设置已保存。", "success");
-    } catch {
-      toast("保存设置失败。", "error");
-    } finally {
-      setSaving(false);
-    }
+    } catch { toast("保存设置失败。", "error"); }
+    finally { setSaving(false); }
   };
 
   const backup = async () => {
     setBacking(true);
-    try {
-      const { path } = await ipc.backupNow();
-      toast(`已备份至 ${path}`, "success");
-    } catch {
-      toast("备份失败。", "error");
-    } finally {
-      setBacking(false);
-    }
+    try { const { path } = await ipc.backupNow(); toast(`已备份至 ${path}`, "success"); }
+    catch { toast("备份失败。", "error"); }
+    finally { setBacking(false); }
   };
+
+  const exportHandover = async () => {
+    const task = tasks[0];
+    if (!task) return toast("还没有可导出的任务。", "warning");
+    setExporting(true);
+    try {
+      const { path } = await ipc.exportHandover(task.id, { events: true, skills: true, failures: true });
+      toast(`交接包已生成：${path}`, "success");
+    } catch { toast("交接包生成失败。", "error"); }
+    finally { setExporting(false); }
+  };
+
+  const readyAgents = agents.filter((agent) => agent.available).length;
 
   return (
     <div>
-      <Kicker badge="本地优先">数据留在本机 · 经验层内核 + 四出口配置</Kicker>
-      <PageTitle sub="AEL 的一切都落在本地 SQLite。这里调整数据落盘、备份策略、检索模式与 Guard 灵敏度,并探测可用的 Agent CLI。">
-        设置
-      </PageTitle>
+      <PageTitle sub="本地数据、记忆召回、Agent 适配器与启动安全集中在一个安静的控制面。">设置</PageTitle>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
-        {/* 左:表单 */}
-        <div className="space-y-6">
-          <Panel className="space-y-4 p-5">
-            <h3 className="font-mono text-[11px] tracking-kicker text-ink/45">外观 · APPEARANCE</h3>
-            <p className="-mt-1 text-[12px] text-ink/45">像 VSCode 一样切换配色。选择立即生效并记住到下次启动。</p>
-            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-              {THEMES.map((t) => {
-                const active = t.id === theme;
-                return (
-                  <button
-                    key={t.id}
-                    onClick={() => setTheme(t.id)}
-                    className={cx(
-                      "group rounded-lg border p-2.5 text-left transition-all",
-                      active ? "border-orange/60 bg-orange/[0.05]" : "border-ink/10 hover:border-ink/25",
-                    )}
-                  >
-                    <div
-                      className="relative flex h-14 items-center gap-1.5 overflow-hidden rounded-md px-2.5"
-                      style={{ background: t.swatch[0] }}
-                    >
-                      <span className="h-6 w-6 rounded" style={{ background: t.swatch[1] }} />
-                      <span className="h-6 w-3 rounded" style={{ background: t.swatch[2] }} />
-                      <span className="ml-auto text-[11px] font-bold" style={{ color: t.swatch[3] }}>
-                        Aa
-                      </span>
-                      {active && (
-                        <span className="absolute right-1.5 top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-orange">
-                          <Check className="h-3 w-3 text-bg" />
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-2 flex items-center justify-between">
-                      <span className="text-[12.5px] text-ink/85">{t.name}</span>
-                      <span className="font-mono text-[9.5px] text-ink/35">{t.kind === "light" ? "浅色" : "深色"}</span>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </Panel>
-
-          <Panel className="space-y-5 p-5">
-            <h3 className="font-mono text-[11px] tracking-kicker text-ink/45">存储与备份 · STORAGE</h3>
-
-            <Field label="数据目录" hint="改动下次启动生效">
-              <input
-                value={form?.dataDir ?? ""}
-                onChange={(e) => patch("dataDir", e.target.value)}
-                placeholder="~/.ael"
-                disabled={!form}
-                className={cx(inputCls, "font-mono text-[12px]")}
-              />
-            </Field>
-
-            <Field label="最大备份数" hint="超过后滚动删除最旧的备份文件">
-              <input
-                type="number"
-                min={0}
-                value={form?.maxBackups ?? 0}
-                onChange={(e) => patch("maxBackups", Math.max(0, Number(e.target.value) || 0))}
-                disabled={!form}
-                className={cx(inputCls, "w-40 tabular-nums")}
-              />
-            </Field>
-          </Panel>
-
-          <Panel className="space-y-5 p-5">
-            <h3 className="font-mono text-[11px] tracking-kicker text-ink/45">检索与 Guard · RETRIEVAL</h3>
-
-            <Field label="检索模式" hint="经验层召回 Skill / Failure 的方式">
-              <select
-                value={form?.retrievalMode ?? "keyword"}
-                onChange={(e) => patch("retrievalMode", e.target.value as RetrievalMode)}
-                disabled={!form}
-                className={inputCls}
-              >
-                {(Object.keys(RETRIEVAL_LABEL) as RetrievalMode[]).map((m) => (
-                  <option key={m} value={m} className="bg-panel">
-                    {RETRIEVAL_LABEL[m]}
-                  </option>
-                ))}
-              </select>
-            </Field>
-
-            <Field label="Guard 命中阈值" hint="低于该分数的历史失败不再触发拦截建议">
-              <div className="flex items-center gap-4">
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={form?.guardMinScore ?? 0}
-                  onChange={(e) => patch("guardMinScore", Number(e.target.value))}
-                  disabled={!form}
-                  className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-panel2 accent-orange"
-                />
-                <span className="w-12 text-right font-mono text-[13px] tabular-nums text-orange">
-                  {(form?.guardMinScore ?? 0).toFixed(2)}
-                </span>
-              </div>
-            </Field>
-          </Panel>
-
-          <div className="flex items-center gap-3">
-            <Button variant="primary" onClick={save} disabled={!dirty || saving}>
-              {saving ? <Spinner /> : <Save className="h-4 w-4" />}
-              {saving ? "保存中…" : "保存设置"}
-            </Button>
-            <Button variant="ghost" onClick={backup} disabled={backing}>
-              {backing ? <Spinner /> : <DatabaseBackup className="h-4 w-4" />}
-              立即备份
-            </Button>
-            {dirty && <span className="font-mono text-[10.5px] text-amber">有未保存的改动</span>}
-          </div>
-        </div>
-
-        {/* 右:Agent 探测 */}
-        <Panel className="h-fit p-5">
-          <div className="mb-4 flex items-center justify-between">
-            <h3 className="font-mono text-[11px] tracking-kicker text-ink/45">AGENT 探测</h3>
-            <Button variant="subtle" className="px-2 py-1 text-[12px]" onClick={detect} disabled={detecting}>
-              {detecting ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />}
-              重新探测
-            </Button>
-          </div>
-
-          <div className="space-y-2">
-            {agents.length === 0 && !detecting && (
-              <p className="rounded-lg border border-dashed border-ink/12 px-4 py-8 text-center text-[12px] text-ink/40">
-                未检测到任何 Agent CLI
-              </p>
-            )}
-            {agents.map((a) => (
-              <div key={a.id} className="rounded-lg border border-ink/10 bg-panel2/40 px-3.5 py-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="flex items-center gap-2 text-[13px] text-ink/85">
-                    <Terminal className="h-3.5 w-3.5 text-ink/35" />
-                    {a.displayName}
-                  </span>
-                  <Badge tone={a.available ? "green" : "red"}>{a.available ? "READY" : "MISSING"}</Badge>
-                </div>
-                <div className="mt-2 space-y-0.5 pl-6 font-mono text-[10.5px] text-ink/40">
-                  {a.version && <div className="truncate">v{a.version}</div>}
-                  <div className="truncate">{a.path || a.executable}</div>
-                </div>
-              </div>
+      <Panel className="overflow-hidden">
+        <div className="grid min-h-[620px] grid-cols-1 lg:grid-cols-[150px_minmax(0,1fr)_300px]">
+          <nav className="border-b border-line bg-panel2/38 p-3 lg:border-b-0 lg:border-r">
+            {([
+              ["general", "通用", Palette],
+              ["memory", "记忆", Search],
+              ["agents", "Agents", Bot],
+              ["safety", "安全", ShieldCheck],
+            ] as const).map(([id, label, Icon]) => (
+              <button type="button" key={id} onClick={() => setSection(id)} className={cx("flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-[11.5px]", section === id ? "bg-orange/[0.08] text-orange" : "text-ink/48 hover:bg-panel2")}>
+                <Icon className="h-3.5 w-3.5" /><span>{label}</span>
+              </button>
             ))}
+          </nav>
+
+          <div className="min-w-0 p-5">
+            <div className="mb-4 flex items-center justify-between">
+              <div><h2 className="font-serif text-[20px]">{section === "general" ? "通用设置" : section === "memory" ? "记忆设置" : section === "agents" ? "Agent 适配器" : "安全设置"}</h2><p className="mt-1 text-[10px] text-ink/32">所有更改都会明确保存在本地。</p></div>
+              {dirty && <Badge tone="amber">未保存</Badge>}
+            </div>
+
+            <div className="overflow-hidden rounded-xl border border-line bg-panel2/28">
+              {section === "general" && (
+                <>
+                  <SettingRow icon={<Palette className="h-3.5 w-3.5" />} label="外观" hint="立即生效">
+                    <select value={theme} onChange={(event) => setTheme(event.target.value)} className={inputCls}>{THEMES.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.kind === "light" ? "浅色" : "深色"}</option>)}</select>
+                  </SettingRow>
+                  <SettingRow icon={<FolderOpen className="h-3.5 w-3.5" />} label="本地数据目录" hint="重启后生效">
+                    <input value={form?.dataDir || ""} onChange={(event) => patch("dataDir", event.target.value)} className={cx(inputCls, "font-mono text-[10px]")} />
+                  </SettingRow>
+                  <SettingRow icon={<DatabaseBackup className="h-3.5 w-3.5" />} label="备份、导出与导入">
+                    <div className="flex items-center justify-end gap-2"><span className="text-[10px] text-ink/36">保留 {form?.maxBackups ?? 0} 份</span><input type="number" min={0} value={form?.maxBackups ?? 0} onChange={(event) => patch("maxBackups", Math.max(0, Number(event.target.value) || 0))} className={cx(inputCls, "w-20 text-center")} /><Button variant="ghost" onClick={backup} disabled={backing}>{backing ? <Spinner /> : "立即备份"}</Button></div>
+                  </SettingRow>
+                </>
+              )}
+
+              {section === "memory" && (
+                <>
+                  <SettingRow icon={<Search className="h-3.5 w-3.5" />} label="检索模式" hint="长期记忆召回方式">
+                    <select value={form?.retrievalMode || "keyword"} onChange={(event) => patch("retrievalMode", event.target.value as RetrievalMode)} className={inputCls}>{(Object.keys(RETRIEVAL_LABEL) as RetrievalMode[]).map((mode) => <option key={mode} value={mode}>{RETRIEVAL_LABEL[mode]}</option>)}</select>
+                  </SettingRow>
+                  <SettingRow icon={<ShieldCheck className="h-3.5 w-3.5" />} label="Guard 命中阈值" hint="低分历史失败不会触发建议">
+                    <div className="flex items-center gap-3"><input type="range" min={0} max={1} step={0.05} value={form?.guardMinScore ?? 0} onChange={(event) => patch("guardMinScore", Number(event.target.value))} className="h-1.5 flex-1 accent-orange" /><span className="w-10 font-mono text-[11px] text-orange">{(form?.guardMinScore ?? 0).toFixed(2)}</span></div>
+                  </SettingRow>
+                  <SettingRow icon={<Database className="h-3.5 w-3.5" />} label="上下文预算" hint="当前由运行时策略管理"><span className="block text-right font-mono text-[10.5px] text-ink/48">8,000 tokens</span></SettingRow>
+                  <SettingRow icon={<RefreshCw className="h-3.5 w-3.5" />} label="衰减与重验" hint="依赖或模型变化时自动降权"><span className="block text-right text-[10.5px] text-green">已启用</span></SettingRow>
+                </>
+              )}
+
+              {section === "agents" && (
+                <>
+                  {agents.map((agent) => (
+                    <SettingRow key={agent.id} icon={<Bot className="h-3.5 w-3.5" />} label={agent.displayName} hint={agent.path || agent.executable}>
+                      <div className="flex items-center justify-end gap-3"><span className="font-mono text-[9.5px] text-ink/34">{agent.version || "版本未知"}</span><Badge tone={agent.available ? "green" : "red"}>{agent.available ? "Ready" : "Missing"}</Badge><ChevronRight className="h-3.5 w-3.5 text-ink/20" /></div>
+                    </SettingRow>
+                  ))}
+                  {agents.length === 0 && <div className="px-5 py-10 text-center text-[11px] text-ink/36">尚未检测到 Agent CLI。</div>}
+                </>
+              )}
+
+              {section === "safety" && (
+                <>
+                  <SettingRow icon={<ShieldCheck className="h-3.5 w-3.5" />} label="信任等级" hint="危险操作仍需人工确认"><span className="block text-right text-[10.5px] text-ink/52">中</span></SettingRow>
+                  <SettingRow icon={<ShieldCheck className="h-3.5 w-3.5" />} label="提示注入防护"><span className="block text-right text-[10.5px] text-green">On</span></SettingRow>
+                  <SettingRow icon={<RefreshCw className="h-3.5 w-3.5" />} label="启动前自检"><span className="block text-right text-[10.5px] text-green">On</span></SettingRow>
+                  <SettingRow icon={<HardDrive className="h-3.5 w-3.5" />} label="执行策略" hint="policy.toml"><button type="button" onClick={() => useStore.getState().setView("gate")} className="flex w-full items-center justify-end gap-2 text-[10.5px] text-orange">打开策略与命令试判 <ChevronRight className="h-3.5 w-3.5" /></button></SettingRow>
+                </>
+              )}
+            </div>
+
+            <div className="mt-5 flex items-center gap-2">
+              <Button variant="primary" onClick={save} disabled={!dirty || saving}>{saving ? <Spinner /> : <Save className="h-3.5 w-3.5" />}{saving ? "保存中…" : "保存设置"}</Button>
+              {section === "agents" && <Button variant="ghost" onClick={detect} disabled={detecting}>{detecting ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />}重新探测</Button>}
+              {section === "agents" && <Button variant="primary" onClick={() => useStore.getState().setView("agents")}><Bot className="h-3.5 w-3.5" />打开 Agent 中心</Button>}
+            </div>
           </div>
 
-          <p className="mt-4 flex items-start gap-2 border-t border-ink/[0.07] pt-4 text-[11px] leading-relaxed text-ink/35">
-            <HardDriveDownload className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            MISSING 表示未在 PATH 中找到该 CLI。安装后点「重新探测」即可在控制台启动会话。
-          </p>
-        </Panel>
-      </div>
+          <aside className="border-t border-line bg-panel2/22 p-5 lg:border-l lg:border-t-0">
+            <h3 className="font-serif text-[18px]">交接状态</h3>
+            <div className="mt-5 space-y-3">
+              {[
+                ["数据库", true, "正常"],
+                ["最新备份", true, "已配置"],
+                ["Adapters", readyAgents === agents.length && agents.length > 0, `${readyAgents} / ${agents.length} 就绪`],
+                ["执行策略", true, "已配置"],
+              ].map(([label, ok, value]) => (
+                <div key={String(label)} className="flex items-center gap-2 text-[10.5px]"><span className={cx("grid h-4 w-4 place-items-center rounded-full", ok ? "bg-green/[0.1] text-green" : "bg-amber/[0.1] text-amber")}>{ok ? <Check className="h-2.5 w-2.5" /> : "!"}</span><span className="flex-1 text-ink/52">{label}</span><span className={ok ? "text-green" : "text-amber"}>{value}</span></div>
+              ))}
+            </div>
+            <div className="mt-6 rounded-xl bg-panel px-4 py-3 text-[10px] leading-relaxed text-ink/40">建议在交接 Agent 前运行自检，确认本地数据库、适配器和策略都能被目标环境读取。</div>
+            <Button variant="ghost" className="mt-5 w-full" onClick={detect} disabled={detecting}>{detecting ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />}运行自检</Button>
+            <Button variant="primary" className="mt-2 w-full" onClick={exportHandover} disabled={exporting || tasks.length === 0}>{exporting ? <Spinner /> : null}{exporting ? "生成中…" : "生成交接包"}</Button>
+          </aside>
+        </div>
+      </Panel>
     </div>
   );
 }

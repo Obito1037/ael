@@ -85,22 +85,153 @@ pub fn save_policy_text(paths: &AelPaths, text: &str) -> AelResult<()> {
     atomic_write(&paths.policy_file, text.as_bytes())
 }
 
-/// 原子写文件:同目录临时文件 + 持久化 + rename。
+/// 原子写文件:同目录独占临时文件 + 持久化 + 平台原子替换。
+///
+/// Windows 替换分支改编自 CC Switch `src-tauri/src/config.rs` 的
+/// `atomic_write`（MIT, Jason Young, commit 273c9cc）。普通 rename 在
+/// Windows 上不能可靠覆盖现有目标；ReplaceFileW 还能保证替换失败时旧文件仍在。
 pub fn atomic_write(target: &Path, bytes: &[u8]) -> AelResult<()> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = target.with_extension(format!(
-        "tmp-{}",
-        crate::util::new_id().split('-').next().unwrap_or("0")
-    ));
+
+    let parent = target
+        .parent()
+        .ok_or_else(|| AelError::invalid_input("无效的写入路径"))?;
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| AelError::invalid_input("无效的写入文件名"))?
+        .to_string_lossy();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let (tmp, mut file) = {
+        let mut created = None;
+        let mut last_collision = None;
+        for _ in 0..16 {
+            let counter = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let candidate = parent.join(format!(
+                "{file_name}.tmp.{}.{stamp}.{counter}",
+                std::process::id()
+            ));
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(file) => {
+                    created = Some((candidate, file));
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_collision = Some(error);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        created.ok_or_else(|| {
+            AelError::from(last_collision.unwrap_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::AlreadyExists, "临时文件名冲突")
+            }))
+        })?
+    };
+
+    use std::io::Write;
+    if let Err(error) = file
+        .write_all(bytes)
+        .and_then(|_| file.flush())
+        .and_then(|_| file.sync_all())
     {
-        use std::io::Write;
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
+        drop(file);
+        let _ = fs::remove_file(&tmp);
+        return Err(error.into());
     }
-    fs::rename(&tmp, target)?;
+    drop(file);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{
+            Foundation::ERROR_NOT_SUPPORTED, Storage::FileSystem::ReplaceFileW,
+        };
+
+        let target_wide: Vec<u16> = target
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let tmp_wide: Vec<u16> = tmp
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut completed = false;
+        let mut last_error = None;
+
+        for _ in 0..3 {
+            // SAFETY:两个 UTF-16 缓冲区以 NUL 结尾,且在调用期间保持有效。
+            let replaced = unsafe {
+                ReplaceFileW(
+                    target_wide.as_ptr(),
+                    tmp_wide.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            if replaced != 0 {
+                completed = true;
+                break;
+            }
+
+            let replace_error = std::io::Error::last_os_error();
+            let unsupported = replace_error.raw_os_error() == Some(ERROR_NOT_SUPPORTED as i32);
+            if replace_error.kind() != std::io::ErrorKind::NotFound && !unsupported {
+                last_error = Some(replace_error);
+                break;
+            }
+
+            match fs::rename(&tmp, target) {
+                Ok(()) => {
+                    completed = true;
+                    break;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    last_error = Some(error);
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    break;
+                }
+            }
+        }
+
+        if !completed {
+            let error = last_error.unwrap_or_else(std::io::Error::last_os_error);
+            let _ = fs::remove_file(&tmp);
+            return Err(AelError::io_error(format!(
+                "原子替换失败: {} -> {}: {error}",
+                tmp.display(),
+                target.display()
+            )));
+        }
+    }
+
+    #[cfg(not(windows))]
+    if let Err(error) = fs::rename(&tmp, target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+
     Ok(())
 }
 
@@ -231,4 +362,28 @@ fn prune_backups(paths: &AelPaths, max_backups: u32) -> AelResult<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::atomic_write;
+
+    #[test]
+    fn atomic_write_replaces_existing_file_without_losing_old_target_on_success() {
+        let root = std::env::temp_dir().join(format!("ael-atomic-write-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&root).expect("create test dir");
+        let target = root.join("settings.json");
+        std::fs::write(&target, b"old").expect("seed target");
+
+        atomic_write(&target, b"new").expect("replace target");
+
+        assert_eq!(std::fs::read(&target).expect("read target"), b"new");
+        let leftovers = std::fs::read_dir(&root)
+            .expect("read test dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .count();
+        assert_eq!(leftovers, 0);
+        std::fs::remove_dir_all(root).expect("remove test dir");
+    }
 }

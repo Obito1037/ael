@@ -4,6 +4,7 @@
 import type {
   AdrRecord,
   AgentProfile,
+  AgentConfigTarget,
   AgentRecommendation,
   AgentSession,
   AgentSnapshot,
@@ -14,9 +15,11 @@ import type {
   FinalizeResult,
   GuardResult,
   PendingCommand,
+  McpServerConfig,
   PolicyDecision,
   PolicyVerdict,
   RankedSkill,
+  ProviderConfig,
   ReviewBrief,
   Settings,
   Skill,
@@ -624,6 +627,75 @@ export const buildStartupContext = (a: any) => ({
   suggestedSkills: [],
   parts: [],
 });
+
+// ── Agent 配置中心（浏览器预览）────────────────────────
+
+let PROVIDERS: ProviderConfig[] = [
+  {
+    id: "provider-official-codex",
+    name: "OpenAI Official",
+    targetApp: "codex",
+    model: "gpt-5.6-codex",
+    endpoint: "https://api.openai.com",
+    apiKey: "",
+    isActive: true,
+    notes: "Codex 默认上游",
+  },
+  {
+    id: "provider-anthropic",
+    name: "Anthropic Official",
+    targetApp: "claude",
+    model: "claude-opus-4-1",
+    endpoint: "https://api.anthropic.com",
+    apiKey: "",
+    isActive: true,
+    notes: "Claude Code 默认上游",
+  },
+];
+
+let MCP_SERVERS: McpServerConfig[] = [
+  { id: "mcp-ael", name: "AEL Memory", command: "ael-mcp", args: ["serve"], env: {}, isActive: true },
+  { id: "mcp-github", name: "GitHub", command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: {}, isActive: false },
+];
+
+const CONFIG_TARGETS: AgentConfigTarget[] = [
+  { id: "codex_global", agentId: "codex", targetType: "native_config", format: "toml", path: "~/.codex/config.toml", exists: true, description: "Codex global config.toml" },
+  { id: "codex_project", agentId: "codex", targetType: "project_context", format: "markdown", path: "D:/repo/AGENTS.md", exists: true, description: "Codex/shared project instructions" },
+  { id: "claude_global", agentId: "claude_code", targetType: "native_config", format: "json", path: "~/.claude/settings.json", exists: true, description: "Claude Code global settings.json" },
+  { id: "claude_project", agentId: "claude_code", targetType: "project_context", format: "markdown", path: "D:/repo/CLAUDE.md", exists: false, description: "Claude Code project instructions" },
+  { id: "gemini_global", agentId: "gemini", targetType: "native_config", format: "json", path: "~/.gemini/settings.json", exists: false, description: "Gemini CLI global settings.json" },
+];
+
+const CONFIG_CONTENT: Record<string, string> = {
+  codex_global: 'model = "gpt-5.6-codex"\nmodel_reasoning_effort = "high"\n',
+  codex_project: "# Project instructions\n\nUse AEL memory before starting work.\n",
+  claude_global: '{\n  "permissions": { "defaultMode": "acceptEdits" }\n}\n',
+};
+
+export const listProviders = () => PROVIDERS;
+export const saveProvider = (provider: ProviderConfig) => {
+  const next = { ...provider, id: provider.id || uid("provider") };
+  PROVIDERS = PROVIDERS.some((item) => item.id === next.id)
+    ? PROVIDERS.map((item) => item.id === next.id ? next : item)
+    : [next, ...PROVIDERS];
+};
+export const testProvider = (providerId: string) => ({ success: true, message: `${PROVIDERS.find((item) => item.id === providerId)?.name || "Provider"} 连接正常（浏览器预览）` });
+export const listMcpServers = () => MCP_SERVERS;
+export const saveMcpServer = (server: McpServerConfig) => {
+  const next = { ...server, id: server.id || uid("mcp") };
+  MCP_SERVERS = MCP_SERVERS.some((item) => item.id === next.id)
+    ? MCP_SERVERS.map((item) => item.id === next.id ? next : item)
+    : [next, ...MCP_SERVERS];
+};
+export const listAgentConfigTargets = (_cwd?: string) => CONFIG_TARGETS;
+export const readAgentConfigTarget = (targetId: string) => ({ target: CONFIG_TARGETS.find((item) => item.id === targetId)!, content: CONFIG_CONTENT[targetId] || "" });
+export const writeAgentConfigTarget = (targetId: string, content: string) => {
+  CONFIG_CONTENT[targetId] = content;
+  const target = CONFIG_TARGETS.find((item) => item.id === targetId)!;
+  target.exists = true;
+  return { target, backupPath: `~/.ael/backups/config/${targetId}.bak`, bytesWritten: content.length };
+};
+export const backupAgentConfigTarget = (targetId: string) => `~/.ael/backups/config/${targetId}.bak`;
 
 export const finalizeTask = (id: string): FinalizeResult => {
   const t = updateTaskStatus(id, "verified");

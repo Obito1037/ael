@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, Download, FileText, Target } from "lucide-react";
 import { useStore } from "../store";
 import { ipc } from "../lib/ipc";
@@ -14,7 +14,7 @@ import {
   TASK_STATUS_LABEL,
   verdictTone,
 } from "../lib/format";
-import { Badge, Button, Empty, Kicker, Meter, PageTitle, Panel, Spinner, Stat } from "../ui";
+import { Badge, Button, Empty, Kicker, PageTitle, Panel, Spinner, Stat } from "../ui";
 import type { ReviewBrief } from "../types";
 
 /** 分节小标题 · mono 大字距 + 语义配色 */
@@ -91,21 +91,13 @@ export function Briefs() {
     }
   };
 
-  // 审阅耗时对比:无 AEL 40 分钟 vs AEL ~5 分钟
-  const aelRatio = useMemo(() => {
-    const secs = brief?.stats.durationSecs;
-    // 以 40 分钟(2400s)为满格基准,AEL 侧默认约 12.5%(5 分钟)
-    if (!secs) return 0.125;
-    return Math.min(1, Math.max(0.05, secs / 2400));
-  }, [brief]);
-
   const s = brief?.stats;
 
   return (
     <div>
-      <Kicker badge="出口 ①">Review Brief · 一页纸把千行 diff 压成审阅证据</Kicker>
-      <PageTitle sub="不给你看 AI 写了什么,给你看它为什么这么写、撞过哪些错、怎么验证的。千行 diff,审阅 ≤ 5 分钟。">
-        Review Brief
+      <Kicker badge="任务收尾">目标、决策、修复、验证与风险</Kicker>
+      <PageTitle sub="把任务过程编译成可核对的一页证据；只展示真实记录，不使用预设的效率宣传数字。">
+        Review
       </PageTitle>
 
       {/* 任务选择器 · chip 行 */}
@@ -168,27 +160,6 @@ export function Briefs() {
               <Stat value={humanDuration(s.durationSecs)} label="全程耗时" />
             </Panel>
           )}
-
-          {/* 审阅耗时对比 gauge */}
-          <Panel className="p-5">
-            <h3 className="mb-4 font-mono text-[11px] tracking-kicker text-ink/45">REVIEW COST · 审阅耗时对比</h3>
-            <div className="space-y-4">
-              <div>
-                <div className="mb-1.5 flex items-center justify-between text-[12px]">
-                  <span className="text-ink/55">无 AEL · 逐行读 diff</span>
-                  <span className="font-mono text-red">~40:00</span>
-                </div>
-                <Meter ratio={1} tone="red" />
-              </div>
-              <div>
-                <div className="mb-1.5 flex items-center justify-between text-[12px]">
-                  <span className="text-ink/55">AEL · 一页 Brief</span>
-                  <span className="font-mono text-green">~{humanDuration(brief.stats.durationSecs) === "—" ? "5:00" : Math.round(aelRatio * 40) + ":00"}</span>
-                </div>
-                <Meter ratio={aelRatio} tone="green" />
-              </div>
-            </div>
-          </Panel>
 
           {/* GOAL · 蓝 */}
           <Section code="GOAL" zh="目标" tone="text-blue">

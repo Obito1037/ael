@@ -1,66 +1,144 @@
 import { useEffect, useMemo, useState } from "react";
-import { Compass, Radar, Sparkles, Wrench } from "lucide-react";
+import {
+  ArchiveRestore,
+  Check,
+  ChevronRight,
+  CircleAlert,
+  Compass,
+  History,
+  Inbox,
+  Library,
+  RefreshCw,
+  Search,
+  ShieldAlert,
+  Sparkles,
+} from "lucide-react";
 import { useStore } from "../store";
 import { ipc } from "../lib/ipc";
-import { SKILL_STATUS_LABEL, cx } from "../lib/format";
-import { Badge, Button, Chip, Empty, Field, Kicker, Meter, PageTitle, Panel, Spinner, inputCls } from "../ui";
-import type { AgentRecommendation, Failure, Skill } from "../types";
+import { cx, shortDate } from "../lib/format";
+import { Badge, Button, Chip, Empty, Field, Meter, Modal, PageTitle, Panel, Spinner, inputCls } from "../ui";
+import type { AgentRecommendation, Failure, Skill, SkillStatus } from "../types";
 
-const freshnessLabel: Record<Skill["freshness"], string> = {
-  fresh: "保鲜",
-  needs_revalidation: "待重验",
-};
-const freshnessTone: Record<Skill["freshness"], "green" | "amber"> = {
-  fresh: "green",
-  needs_revalidation: "amber",
-};
+type MemoryTab = "library" | "inbox" | "health" | "routing";
+type LibraryFilter = "all" | "active" | "needs_revalidation" | "deprecated";
+
+const TABS: { id: MemoryTab; label: string; icon: typeof Library }[] = [
+  { id: "library", label: "记忆库", icon: Library },
+  { id: "inbox", label: "待确认", icon: Inbox },
+  { id: "health", label: "健康与遗忘", icon: History },
+  { id: "routing", label: "Agent 路由", icon: Compass },
+];
+
+function confidence(skill: Skill) {
+  const total = skill.successCount + skill.failCount;
+  if (total === 0) return { label: "未验证", tone: "amber" as const };
+  const ratio = skill.successCount / total;
+  if (ratio >= 0.82 && skill.successCount >= 3) return { label: "高可信", tone: "green" as const };
+  if (ratio >= 0.55) return { label: "中等", tone: "orange" as const };
+  return { label: "低可信", tone: "red" as const };
+}
+
+function SkillRow({
+  skill,
+  selected,
+  onSelect,
+}: {
+  skill: Skill;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const trust = confidence(skill);
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cx(
+        "grid w-full grid-cols-[minmax(0,1fr)_88px_76px_76px_20px] items-center gap-3 px-4 py-3 text-left transition-colors",
+        selected ? "bg-panel2/92" : "hover:bg-panel2/48",
+      )}
+    >
+      <span className="min-w-0">
+        <span className="flex items-center gap-2">
+          <span className={cx("h-1.5 w-1.5 shrink-0 rounded-full", skill.status === "active" ? "bg-green" : skill.status === "draft" ? "bg-orange" : "bg-ink/20")} />
+          <span className="truncate text-[12.5px] font-medium text-ink/78">{skill.name}</span>
+        </span>
+        <span className="mt-1 block truncate pl-3.5 text-[10.5px] text-ink/38">{skill.trigger}</span>
+      </span>
+      <span className="truncate font-mono text-[9.5px] text-ink/34">{skill.tags.slice(0, 2).join(" / ") || "全局"}</span>
+      <Badge tone={trust.tone} className="justify-center">{trust.label}</Badge>
+      <span className={cx("text-right text-[10px]", skill.freshness === "fresh" ? "text-green" : "text-amber")}>
+        {skill.freshness === "fresh" ? "新鲜" : "待重验"}
+      </span>
+      <ChevronRight className="h-3.5 w-3.5 text-ink/20" />
+    </button>
+  );
+}
 
 export function Memory() {
-  const toast = useStore((s) => s.toast);
-
+  const toast = useStore((state) => state.toast);
+  const goTask = useStore((state) => state.goTask);
+  const [tab, setTab] = useState<MemoryTab>("library");
   const [skills, setSkills] = useState<Skill[]>([]);
   const [failures, setFailures] = useState<Failure[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<LibraryFilter>("all");
   const [checking, setChecking] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [forgetTarget, setForgetTarget] = useState<Skill | null>(null);
 
-  // 智能路由
   const [goal, setGoal] = useState("");
   const [tags, setTags] = useState("");
   const [recs, setRecs] = useState<AgentRecommendation[]>([]);
   const [routing, setRouting] = useState(false);
 
-  const loadSkills = () => ipc.listSkills({ limit: 100 }).then(setSkills).catch(() => {});
-  const loadFailures = () => ipc.listFailures({ limit: 100 }).then(setFailures).catch(() => {});
-
-  useEffect(() => {
-    loadSkills();
-    loadFailures();
-  }, []);
-
-  const maxScore = useMemo(
-    () => recs.reduce((m, r) => Math.max(m, r.score), 0) || 1,
-    [recs],
-  );
-
-  const runFreshness = async () => {
-    setChecking(true);
+  const load = async () => {
     try {
-      const { downgraded } = await ipc.runFreshnessCheck();
-      toast(`保鲜检查完成:降级 ${downgraded} 条`, downgraded > 0 ? "warning" : "success");
-      await loadSkills();
+      const [nextSkills, nextFailures] = await Promise.all([
+        ipc.listSkills({ limit: 300 }),
+        ipc.listFailures({ limit: 300 }),
+      ]);
+      setSkills(nextSkills);
+      setFailures(nextFailures);
+      setSelectedId((current) => current || nextSkills[0]?.id || null);
     } catch {
-      toast("保鲜检查失败。", "error");
-    } finally {
-      setChecking(false);
+      toast("记忆库加载失败。", "error");
     }
   };
 
-  const activate = async (id: string) => {
-    setBusyId(id);
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const drafts = useMemo(() => skills.filter((skill) => skill.status === "draft"), [skills]);
+  const active = useMemo(() => skills.filter((skill) => skill.status === "active"), [skills]);
+  const archived = useMemo(() => skills.filter((skill) => skill.status === "deprecated"), [skills]);
+  const stale = useMemo(() => skills.filter((skill) => skill.freshness === "needs_revalidation"), [skills]);
+  const harmful = useMemo(
+    () => skills.filter((skill) => skill.failCount > 0 && skill.failCount >= skill.successCount),
+    [skills],
+  );
+
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return skills.filter((skill) => {
+      if (filter === "active" && skill.status !== "active") return false;
+      if (filter === "deprecated" && skill.status !== "deprecated") return false;
+      if (filter === "needs_revalidation" && skill.freshness !== "needs_revalidation") return false;
+      if (!needle) return true;
+      return [skill.name, skill.trigger, skill.body, ...skill.tags].some((value) => value.toLowerCase().includes(needle));
+    });
+  }, [filter, query, skills]);
+
+  const selected = skills.find((skill) => skill.id === selectedId) || filtered[0] || null;
+  const healthScore = Math.max(0, Math.round(100 - stale.length * 5 - harmful.length * 9 - drafts.length * 2));
+
+  const updateStatus = async (skill: Skill, status: SkillStatus, message: string) => {
+    setBusyId(skill.id);
     try {
-      await ipc.updateSkillStatus(id, "active");
-      toast("已确认转为已启用。", "success");
-      await loadSkills();
+      await ipc.updateSkillStatus(skill.id, status);
+      toast(message, "success");
+      await load();
     } catch {
       toast("状态更新失败。", "error");
     } finally {
@@ -68,12 +146,25 @@ export function Memory() {
     }
   };
 
-  const revalidate = async (id: string) => {
-    setBusyId(id);
+  const runFreshness = async () => {
+    setChecking(true);
     try {
-      await ipc.revalidateSkill(id);
-      toast("经验已重验,恢复保鲜。", "success");
-      await loadSkills();
+      const { downgraded } = await ipc.runFreshnessCheck();
+      toast(downgraded > 0 ? `${downgraded} 条记忆需要重新验证。` : "所有已启用记忆都在保鲜期内。", downgraded > 0 ? "warning" : "success");
+      await load();
+    } catch {
+      toast("保鲜检查失败。", "error");
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const revalidate = async (skill: Skill) => {
+    setBusyId(skill.id);
+    try {
+      await ipc.revalidateSkill(skill.id);
+      toast("记忆已重验并恢复召回权重。", "success");
+      await load();
     } catch {
       toast("重验失败。", "error");
     } finally {
@@ -85,205 +176,318 @@ export function Memory() {
     if (!goal.trim()) return toast("请先描述目标。", "warning");
     setRouting(true);
     try {
-      const tagList = tags.split(/[,，\s]+/).map((t) => t.trim()).filter(Boolean);
-      const r = await ipc.recommendAgents(goal.trim(), tagList.length ? tagList : undefined);
-      setRecs(r);
-      if (r.length === 0) toast("暂无匹配的 Agent 推荐。", "info");
+      const tagList = tags.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
+      const result = await ipc.recommendAgents(goal.trim(), tagList.length ? tagList : undefined);
+      setRecs(result);
+      if (result.length === 0) toast("没有足够历史证据做 Agent 推荐。", "info");
     } catch {
-      toast("路由推荐失败。", "error");
+      toast("Agent 路由失败。", "error");
     } finally {
       setRouting(false);
     }
   };
 
+  const maxScore = useMemo(() => recs.reduce((max, item) => Math.max(max, item.score), 0) || 1, [recs]);
+
   return (
     <div>
-      <Kicker badge="经验层">经验库 · 同一个错误第二次不再犯 · 换 Agent 不必重讲</Kicker>
-      <PageTitle sub="沉淀成功经验(Skills)与失败教训(Failures),并据历史战绩为下一个目标智能路由最合适的 Agent。">
-        经验库
-      </PageTitle>
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <PageTitle sub="让可靠经验被高效复用；让错误、过时和无关内容逐步降权，并能安全退出召回。">
+          记忆
+        </PageTitle>
+        <Button variant="ghost" onClick={runFreshness} disabled={checking} className="mb-7">
+          {checking ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />}
+          运行保鲜检查
+        </Button>
+      </div>
 
-      {/* ① Skills */}
-      <section>
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="flex items-center gap-2 font-mono text-[11px] tracking-kicker text-ink/45">
-            <Sparkles className="h-3.5 w-3.5 text-orange" /> SKILLS · 成功经验
-          </h2>
-          <Button variant="ghost" className="px-3 py-1.5 text-[12px]" onClick={runFreshness} disabled={checking}>
-            {checking ? <Spinner /> : <Radar className="h-3.5 w-3.5" />}
-            保鲜检查
-          </Button>
-        </div>
+      <div className="mb-6 flex flex-wrap items-center gap-1 rounded-xl bg-panel2/72 p-1.5">
+        {TABS.map((item) => {
+          const Icon = item.icon;
+          const count = item.id === "inbox" ? drafts.length : item.id === "health" ? stale.length + harmful.length : null;
+          return (
+            <button
+              type="button"
+              key={item.id}
+              onClick={() => setTab(item.id)}
+              className={cx(
+                "flex items-center gap-2 rounded-lg px-3.5 py-2 text-[11.5px] transition-colors",
+                tab === item.id ? "bg-panel text-ink shadow-[0_1px_4px_rgb(var(--c-ink)_/_0.05)]" : "text-ink/46 hover:text-ink/74",
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" strokeWidth={1.7} />
+              {item.label}
+              {count != null && count > 0 && <span className="rounded-full bg-orange/[0.1] px-1.5 font-mono text-[9px] text-orange">{count}</span>}
+            </button>
+          );
+        })}
+      </div>
 
-        {skills.length === 0 ? (
-          <Empty>还没有沉淀任何经验。任务验证通过后会自动生成草案。</Empty>
-        ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {skills.map((sk) => (
-              <Panel key={sk.id} className="flex flex-col gap-3 p-4">
-                <div className="flex items-start justify-between gap-2">
-                  <h3 className="text-[14px] font-semibold leading-snug text-ink/90">{sk.name}</h3>
-                  <Badge tone={freshnessTone[sk.freshness]}>{freshnessLabel[sk.freshness]}</Badge>
+      {tab === "library" && (
+        <div>
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <div className="relative min-w-[260px] flex-1">
+              <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-ink/28" />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="搜索内容、触发条件、来源或标签"
+                className={cx(inputCls, "pl-9")}
+              />
+            </div>
+            <div className="flex items-center rounded-lg border border-line bg-panel p-1">
+              {([
+                ["all", "全部"],
+                ["active", "已启用"],
+                ["needs_revalidation", "待重验"],
+                ["deprecated", "已停止"],
+              ] as const).map(([id, label]) => (
+                <button
+                  type="button"
+                  key={id}
+                  onClick={() => setFilter(id)}
+                  className={cx("rounded-md px-2.5 py-1.5 text-[10.5px]", filter === id ? "bg-panel2 text-ink/76" : "text-ink/38")}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid min-h-[520px] grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+            <Panel className="overflow-hidden">
+              <div className="grid grid-cols-[minmax(0,1fr)_88px_76px_76px_20px] gap-3 border-b border-line bg-panel2/42 px-4 py-2 text-[9.5px] tracking-[0.08em] text-ink/34">
+                <span>记忆内容</span><span>范围</span><span>可信度</span><span className="text-right">新鲜度</span><span />
+              </div>
+              {filtered.length === 0 ? (
+                <div className="p-4"><Empty>没有匹配的记忆。</Empty></div>
+              ) : (
+                <div className="divide-y divide-line">
+                  {filtered.map((skill) => (
+                    <SkillRow key={skill.id} skill={skill} selected={selected?.id === skill.id} onSelect={() => setSelectedId(skill.id)} />
+                  ))}
                 </div>
+              )}
+              <div className="border-t border-line px-4 py-2.5 text-[9.5px] text-ink/30">共 {filtered.length} 条 · 已启用 {active.length} · 已停止 {archived.length}</div>
+            </Panel>
 
-                <p className="line-clamp-2 font-mono text-[11.5px] leading-relaxed text-ink/45">
-                  触发:{sk.trigger}
-                </p>
-
-                {sk.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5">
-                    {sk.tags.map((t) => (
-                      <Chip key={t}>{t}</Chip>
-                    ))}
+            {selected ? (
+              <Panel className="h-fit overflow-hidden">
+                <div className="border-b border-line px-5 py-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <h2 className="font-serif text-[19px] leading-snug text-ink">记忆详情</h2>
+                    <Badge tone={selected.status === "active" ? "green" : selected.status === "draft" ? "orange" : "ink"}>
+                      {selected.status === "active" ? "已启用" : selected.status === "draft" ? "待确认" : "已停止召回"}
+                    </Badge>
                   </div>
-                )}
-
-                <div className="mt-auto flex items-center justify-between border-t border-ink/[0.07] pt-3">
-                  <div className="flex items-center gap-3 font-mono text-[11px]">
-                    <span className="text-green">+{sk.successCount}</span>
-                    <span className="text-red">-{sk.failCount}</span>
-                    <span className="text-ink/35">{SKILL_STATUS_LABEL[sk.status]}</span>
+                  <p className="mt-3 text-[13px] font-medium leading-relaxed text-ink/78">{selected.name}</p>
+                </div>
+                <div className="space-y-5 px-5 py-4">
+                  <div>
+                    <div className="text-[9.5px] tracking-[0.1em] text-ink/32">触发条件</div>
+                    <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink/58">{selected.trigger}</p>
                   </div>
-                  {sk.status === "draft" && (
-                    <Button
-                      variant="primary"
-                      className="px-3 py-1.5 text-[11.5px]"
-                      onClick={() => activate(sk.id)}
-                      disabled={busyId === sk.id}
-                    >
-                      {busyId === sk.id ? <Spinner /> : null} 确认转 active
+                  <div>
+                    <div className="text-[9.5px] tracking-[0.1em] text-ink/32">记忆正文</div>
+                    <p className="mt-1.5 whitespace-pre-wrap rounded-xl bg-panel2/68 p-3 text-[11.5px] leading-relaxed text-ink/62">{selected.body}</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-[10.5px]">
+                    <div className="rounded-lg bg-panel2/52 p-3"><span className="block text-ink/32">使用结果</span><span className="mt-1 block font-mono text-green">helped {selected.successCount}</span><span className="font-mono text-red">harmful {selected.failCount}</span></div>
+                    <div className="rounded-lg bg-panel2/52 p-3"><span className="block text-ink/32">版本</span><span className="mt-1 block font-mono text-ink/62">v{selected.version}</span><span className="text-ink/38">{shortDate(selected.updatedAt)}</span></div>
+                  </div>
+                  <div>
+                    <div className="text-[9.5px] tracking-[0.1em] text-ink/32">来源链</div>
+                    <div className="mt-2 space-y-2 border-l border-line pl-3 text-[10.5px] text-ink/48">
+                      <div>任务 · {selected.sourceTaskId ? selected.sourceTaskId.slice(0, 8) : "未记录"}</div>
+                      <div>Agent · {selected.originAgent || "未记录"}</div>
+                      <div>模型 · {selected.originModel || "未记录"}</div>
+                    </div>
+                    {selected.sourceTaskId && (
+                      <button type="button" onClick={() => goTask(selected.sourceTaskId!)} className="mt-2 text-[10.5px] text-orange hover:underline">
+                        查看来源任务 →
+                      </button>
+                    )}
+                  </div>
+                  {selected.tags.length > 0 && <div className="flex flex-wrap gap-1.5">{selected.tags.map((tag) => <Chip key={tag}>{tag}</Chip>)}</div>}
+                </div>
+                <div className="flex flex-wrap gap-2 border-t border-line bg-panel2/36 px-5 py-4">
+                  {selected.status === "draft" && (
+                    <Button variant="primary" onClick={() => updateStatus(selected, "active", "已确认，这条记忆现在可以被召回。") } disabled={busyId === selected.id}>
+                      {busyId === selected.id ? <Spinner /> : <Check className="h-3.5 w-3.5" />} 确认
                     </Button>
                   )}
-                  {sk.freshness === "needs_revalidation" && sk.status !== "draft" && (
-                    <Button
-                      variant="ghost"
-                      className="px-3 py-1.5 text-[11.5px]"
-                      onClick={() => revalidate(sk.id)}
-                      disabled={busyId === sk.id}
-                    >
-                      {busyId === sk.id ? <Spinner /> : null} 已重验
+                  {selected.freshness === "needs_revalidation" && selected.status === "active" && (
+                    <Button variant="ghost" onClick={() => revalidate(selected)} disabled={busyId === selected.id}>重新验证</Button>
+                  )}
+                  {selected.status === "active" && (
+                    <Button variant="danger" onClick={() => setForgetTarget(selected)}>停止召回</Button>
+                  )}
+                  {selected.status === "deprecated" && (
+                    <Button variant="ghost" onClick={() => updateStatus(selected, "active", "这条记忆已恢复召回。") } disabled={busyId === selected.id}>
+                      <ArchiveRestore className="h-3.5 w-3.5" /> 恢复
                     </Button>
                   )}
                 </div>
               </Panel>
-            ))}
-          </div>
-        )}
-      </section>
-
-      {/* ② Failures */}
-      <section className="mt-10">
-        <h2 className="mb-3 flex items-center gap-2 font-mono text-[11px] tracking-kicker text-ink/45">
-          <Wrench className="h-3.5 w-3.5 text-red" /> FAILURES · 失败教训
-        </h2>
-
-        {failures.length === 0 ? (
-          <Empty>暂无失败记录。踩过的坑会在这里结成护栏。</Empty>
-        ) : (
-          <Panel className="divide-y divide-ink/[0.07]">
-            {failures.map((f) => (
-              <div key={f.id} className="px-5 py-4">
-                <div className="flex items-center gap-2.5">
-                  <span className="font-mono text-[11px] text-ink/35">{f.signature.slice(0, 8)}</span>
-                  {f.occurrences > 1 && (
-                    <Badge tone="orange">惯犯 ×{f.occurrences}</Badge>
-                  )}
-                  <code className="ml-auto truncate font-mono text-[10.5px] text-ink/40">{f.guardRule}</code>
-                </div>
-                <p className="mt-2 text-[13.5px] leading-relaxed text-ink/85">{f.description}</p>
-                {(f.rootCause || f.fix) && (
-                  <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-                    {f.rootCause && (
-                      <p className="text-[12px] leading-relaxed text-ink/50">
-                        <span className="font-mono text-[10px] tracking-wide text-red">根因 </span>
-                        {f.rootCause}
-                      </p>
-                    )}
-                    {f.fix && (
-                      <p className="text-[12px] leading-relaxed text-ink/50">
-                        <span className="font-mono text-[10px] tracking-wide text-green">修复 </span>
-                        {f.fix}
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
-          </Panel>
-        )}
-      </section>
-
-      {/* ③ 智能路由 */}
-      <section className="mt-10">
-        <h2 className="mb-3 flex items-center gap-2 font-mono text-[11px] tracking-kicker text-ink/45">
-          <Compass className="h-3.5 w-3.5 text-blue" /> SMART ROUTING · 智能路由
-        </h2>
-
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-[340px_minmax(0,1fr)]">
-          <Panel className="space-y-3 p-4">
-            <Field label="目标 Goal">
-              <textarea
-                value={goal}
-                onChange={(e) => setGoal(e.target.value)}
-                placeholder="描述下一个任务的目标…"
-                rows={3}
-                className={cx(inputCls, "resize-none")}
-              />
-            </Field>
-            <Field label="标签 Tags" hint="逗号或空格分隔">
-              <input
-                value={tags}
-                onChange={(e) => setTags(e.target.value)}
-                placeholder="rust, sqlite, tauri"
-                className={inputCls}
-              />
-            </Field>
-            <Button variant="primary" className="w-full" onClick={route} disabled={routing}>
-              {routing ? <Spinner /> : <Compass className="h-4 w-4" />}
-              {routing ? "推荐中…" : "推荐 Agent"}
-            </Button>
-          </Panel>
-
-          <div>
-            {recs.length === 0 ? (
-              <Empty className="h-full">输入目标并推荐,按历史战绩排序候选 Agent。</Empty>
             ) : (
-              <div className="space-y-3">
-                {recs.map((r) => (
-                  <Panel key={r.agentKind} className="p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="text-[14px] font-semibold text-ink/90">{r.agentKind}</span>
-                      <span className="font-mono text-[11px] text-ink/40">
-                        <span className="text-green">+{r.successCount}</span>{" "}
-                        <span className="text-red">-{r.failCount}</span>{" "}
-                        <span className="text-ink/30">· {r.taskCount} 次</span>
-                      </span>
-                    </div>
-                    <div className="mt-2.5 flex items-center gap-3">
-                      <div className="flex-1">
-                        <Meter ratio={r.score / maxScore} tone="orange" />
-                      </div>
-                      <span className="w-12 text-right font-mono text-[12px] tabular-nums text-orange">
-                        {r.score.toFixed(1)}
-                      </span>
-                    </div>
-                    {r.reasons.length > 0 && (
-                      <ul className="mt-3 space-y-1">
-                        {r.reasons.map((reason, i) => (
-                          <li key={i} className="flex gap-2 text-[12px] leading-relaxed text-ink/55">
-                            <span className="text-orange">·</span>
-                            {reason}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </Panel>
-                ))}
-              </div>
+              <Empty className="h-fit">选择一条记忆查看来源与使用结果。</Empty>
             )}
           </div>
         </div>
-      </section>
+      )}
+
+      {tab === "inbox" && (
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+          <Panel className="overflow-hidden">
+            <div className="border-b border-line bg-panel2/42 px-5 py-3">
+              <h2 className="font-serif text-[18px]">决定什么值得被长期记住</h2>
+              <p className="mt-1 text-[10.5px] text-ink/38">草案不会自动进入长期召回；需要人工确认或停止。</p>
+            </div>
+            {drafts.length === 0 ? (
+              <div className="p-4"><Empty>没有待确认候选。新的任务收尾后，原子记忆草案会出现在这里。</Empty></div>
+            ) : (
+              <div className="divide-y divide-line">
+                {drafts.map((skill) => (
+                  <button type="button" key={skill.id} onClick={() => setSelectedId(skill.id)} className={cx("w-full px-5 py-4 text-left hover:bg-panel2/42", selectedId === skill.id && "bg-panel2/72")}>
+                    <div className="flex items-start gap-3">
+                      <span className="mt-0.5 grid h-7 w-7 place-items-center rounded-full bg-orange/[0.09] text-orange"><Sparkles className="h-3.5 w-3.5" /></span>
+                      <span className="min-w-0 flex-1"><span className="block text-[12.5px] font-medium text-ink/76">{skill.name}</span><span className="mt-1 block text-[10.5px] leading-relaxed text-ink/40">{skill.trigger}</span></span>
+                      <Badge tone={confidence(skill).tone}>{confidence(skill).label}</Badge>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </Panel>
+          {selected?.status === "draft" ? (
+            <Panel className="h-fit p-5">
+              <div className="text-[9.5px] tracking-[0.1em] text-ink/32">提炼结果</div>
+              <h2 className="mt-2 font-serif text-[19px] leading-snug">{selected.name}</h2>
+              <p className="mt-3 rounded-xl bg-panel2/68 p-3 text-[11.5px] leading-relaxed text-ink/58">{selected.body}</p>
+              <div className="mt-4 grid grid-cols-2 gap-2 text-[10px] text-ink/42">
+                <span>来源 {selected.sourceTaskId?.slice(0, 8) || "未记录"}</span><span>版本 v{selected.version}</span>
+                <span>Agent {selected.originAgent || "未记录"}</span><span>模型 {selected.originModel || "未记录"}</span>
+              </div>
+              <div className="mt-5 flex gap-2">
+                <Button variant="primary" className="flex-1" onClick={() => updateStatus(selected, "active", "候选记忆已确认。") } disabled={busyId === selected.id}>确认</Button>
+                <Button variant="danger" onClick={() => setForgetTarget(selected)}>拒绝</Button>
+              </div>
+            </Panel>
+          ) : (
+            <Empty className="h-fit">选择候选，检查提炼结果和来源。</Empty>
+          )}
+        </div>
+      )}
+
+      {tab === "health" && (
+        <div>
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-[280px_minmax(0,1fr)]">
+            <Panel className="p-6">
+              <div className="mx-auto grid h-28 w-28 place-items-center rounded-full" style={{ background: `conic-gradient(rgb(var(--c-green)) ${healthScore}%, rgb(var(--c-green) / 0.11) 0)` }}>
+                <div className="grid h-[92px] w-[92px] place-items-center rounded-full bg-panel"><span className="font-serif text-[32px] text-green">{healthScore}</span></div>
+              </div>
+              <p className="mt-4 text-center font-serif text-[18px]">记忆健康</p>
+              <p className="mt-1 text-center text-[10.5px] leading-relaxed text-ink/38">分数来自新鲜度、失败次数和待确认积压。</p>
+              <Button variant="ghost" onClick={runFreshness} disabled={checking} className="mt-5 w-full">{checking ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />}重新评估</Button>
+            </Panel>
+
+            <Panel className="overflow-hidden">
+              <div className="border-b border-line px-5 py-4"><h2 className="font-serif text-[18px]">需要处理</h2></div>
+              <div className="divide-y divide-line">
+                {[
+                  { icon: RefreshCw, label: "需要重验", count: stale.length, note: "代码、依赖或模型环境可能已经变化", tone: "text-amber", action: () => { setFilter("needs_revalidation"); setTab("library"); } },
+                  { icon: ShieldAlert, label: "可能有害", count: harmful.length, note: "失败次数已经接近或超过成功次数", tone: "text-red", action: () => setTab("library") },
+                  { icon: Inbox, label: "待确认", count: drafts.length, note: "尚未获得进入长期召回的许可", tone: "text-orange", action: () => setTab("inbox") },
+                  { icon: ArchiveRestore, label: "已停止召回", count: archived.length, note: "保留来源与内容，需要时可以恢复", tone: "text-ink/42", action: () => { setFilter("deprecated"); setTab("library"); } },
+                ].map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <button type="button" key={item.label} onClick={item.action} className="flex w-full items-center gap-4 px-5 py-4 text-left hover:bg-panel2/42">
+                      <span className={cx("grid h-9 w-9 place-items-center rounded-full bg-panel2", item.tone)}><Icon className="h-4 w-4" strokeWidth={1.7} /></span>
+                      <span className="min-w-0 flex-1"><span className="block text-[12.5px] text-ink/72">{item.label}</span><span className="mt-0.5 block text-[10.5px] text-ink/36">{item.note}</span></span>
+                      <span className="font-serif text-[22px] text-ink/54">{item.count}</span><ChevronRight className="h-3.5 w-3.5 text-ink/20" />
+                    </button>
+                  );
+                })}
+              </div>
+            </Panel>
+          </div>
+
+          <section className="mt-7">
+            <div className="mb-3 flex items-center gap-2 text-[10.5px] tracking-[0.1em] text-ink/38"><CircleAlert className="h-3.5 w-3.5 text-red" />失败教训 · {failures.length}</div>
+            {failures.length === 0 ? (
+              <Empty>暂无失败记录。</Empty>
+            ) : (
+              <Panel className="divide-y divide-line overflow-hidden">
+                {failures.map((failure) => (
+                  <div key={failure.id} className="grid gap-3 px-5 py-4 md:grid-cols-[minmax(0,1fr)_180px_80px] md:items-center">
+                    <div><div className="text-[12.5px] font-medium text-ink/72">{failure.description}</div><div className="mt-1 text-[10.5px] text-ink/38">{failure.rootCause || "根因尚未补充"}</div></div>
+                    <code className="truncate font-mono text-[9.5px] text-ink/36">{failure.guardRule}</code>
+                    <Badge tone={failure.occurrences > 1 ? "red" : "amber"} className="justify-center">出现 {failure.occurrences} 次</Badge>
+                  </div>
+                ))}
+              </Panel>
+            )}
+          </section>
+        </div>
+      )}
+
+      {tab === "routing" && (
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-[360px_minmax(0,1fr)]">
+          <Panel className="h-fit space-y-4 p-5">
+            <h2 className="font-serif text-[19px]">用历史证据选择 Agent</h2>
+            <p className="text-[10.5px] leading-relaxed text-ink/38">推荐只基于已记录的成功与失败，不把模型名称当作能力证明。</p>
+            <Field label="任务目标">
+              <textarea value={goal} onChange={(event) => setGoal(event.target.value)} rows={4} placeholder="描述下一个任务…" className={cx(inputCls, "resize-none")} />
+            </Field>
+            <Field label="标签" hint="用逗号或空格分隔">
+              <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="rust, tauri, windows" className={inputCls} />
+            </Field>
+            <Button variant="primary" onClick={route} disabled={routing} className="w-full">{routing ? <Spinner /> : <Compass className="h-4 w-4" />}{routing ? "正在推荐…" : "生成推荐"}</Button>
+          </Panel>
+          {recs.length === 0 ? (
+            <Empty className="min-h-[260px]">输入目标后，AEL 会按历史任务结果说明推荐理由。</Empty>
+          ) : (
+            <Panel className="divide-y divide-line overflow-hidden">
+              {recs.map((rec, index) => (
+                <div key={rec.agentKind} className="px-5 py-4">
+                  <div className="flex items-center gap-3"><span className="font-serif text-[22px] text-ink/28">0{index + 1}</span><span className="flex-1 text-[13px] font-medium text-ink/76">{rec.agentKind}</span><span className="font-mono text-[10px] text-ink/38">+{rec.successCount} / -{rec.failCount} · {rec.taskCount} 次</span></div>
+                  <div className="mt-3 flex items-center gap-3"><Meter ratio={rec.score / maxScore} tone="orange" /><span className="w-10 text-right font-mono text-[10px] text-orange">{rec.score.toFixed(1)}</span></div>
+                  {rec.reasons.length > 0 && <p className="mt-2 text-[10.5px] leading-relaxed text-ink/40">{rec.reasons.join(" · ")}</p>}
+                </div>
+              ))}
+            </Panel>
+          )}
+        </div>
+      )}
+
+      {forgetTarget && (
+        <Modal title="停止召回这条记忆？" onClose={() => setForgetTarget(null)}>
+          <p className="text-[13px] font-medium text-ink/76">{forgetTarget.name}</p>
+          <div className="mt-4 rounded-xl bg-panel2/72 p-4 text-[11px] leading-relaxed text-ink/50">
+            停止后，它不会再进入新任务的记忆召回。内容、来源和历史结果仍会保留，你可以随时恢复。这不是永久删除。
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3 text-[10.5px]">
+            <div className="rounded-lg border border-line p-3"><span className="block text-ink/34">可能影响</span><span className="mt-1 block text-ink/64">标签 {forgetTarget.tags.join(" / ") || "全局"} 的后续任务</span></div>
+            <div className="rounded-lg border border-line p-3"><span className="block text-ink/34">可恢复性</span><span className="mt-1 block text-green">保留全部来源链</span></div>
+          </div>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button variant="subtle" onClick={() => setForgetTarget(null)}>返回</Button>
+            <Button
+              variant="danger"
+              disabled={busyId === forgetTarget.id}
+              onClick={async () => {
+                const target = forgetTarget;
+                await updateStatus(target, "deprecated", "已停止召回；这条记忆仍可恢复。");
+                setForgetTarget(null);
+              }}
+            >
+              {busyId === forgetTarget.id ? <Spinner /> : <ShieldAlert className="h-3.5 w-3.5" />}
+              确认停止召回
+            </Button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

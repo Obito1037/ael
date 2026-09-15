@@ -92,9 +92,9 @@ export function Gate() {
 
   return (
     <div>
-      <Kicker badge="出口 ③">运行时海关 · 待裁决队列 · 裁决账本 · 策略引擎</Kicker>
-      <PageTitle sub="规则会被模型遗忘,但不会被网关遗忘。危险命令扣在裁决线上等你放行或拦截,每一次裁决都留痕入账。">
-        海关裁决
+      <Kicker badge="运行时安全">待确认命令、裁决记录与策略</Kicker>
+      <PageTitle sub="危险命令在进入 Shell 前等待你的决定；每次放行或阻止都有记录。">
+        安全
       </PageTitle>
 
       {/* 顶部统计 */}

@@ -10,15 +10,13 @@ export interface ThemeDef {
 }
 
 export const THEMES: ThemeDef[] = [
-  { id: "graphite", name: "石墨橙", kind: "dark", swatch: ["#0F1216", "#1B222B", "#FF6A2B", "#E9EDF2"] },
-  { id: "midnight", name: "午夜蓝", kind: "dark", swatch: ["#0A0E1A", "#171F36", "#5494FF", "#E4EBF7"] },
-  { id: "forest", name: "深林绿", kind: "dark", swatch: ["#0D1411", "#1A2821", "#34D399", "#E4F0E8"] },
-  { id: "amethyst", name: "暗紫水晶", kind: "dark", swatch: ["#110E1A", "#231C34", "#A78BFA", "#EBE6F6"] },
-  { id: "daylight", name: "石灰白", kind: "light", swatch: ["#F4F5F7", "#FFFFFF", "#E25814", "#1A1D22"] },
-  { id: "contrast", name: "高对比", kind: "dark", swatch: ["#000000", "#141414", "#FF8A2E", "#FFFFFF"] },
+  { id: "paper", name: "暖纸", kind: "light", swatch: ["#FAF9F5", "#FFFFFF", "#C96442", "#2B2A27"] },
+  { id: "linen", name: "亚麻", kind: "light", swatch: ["#F6F3EC", "#FFFDF8", "#B15333", "#302C26"] },
+  { id: "charcoal", name: "暖炭", kind: "dark", swatch: ["#262624", "#30302E", "#DE7854", "#F2F0EA"] },
+  { id: "contrast", name: "高对比", kind: "dark", swatch: ["#121211", "#262623", "#ED805A", "#FFFEF9"] },
 ];
 
-export const DEFAULT_THEME = "graphite";
+export const DEFAULT_THEME = "paper";
 const STORAGE_KEY = "ael-theme";
 
 export function loadTheme(): string {

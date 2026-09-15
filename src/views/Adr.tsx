@@ -89,9 +89,9 @@ export function Adr() {
 
   return (
     <div>
-      <Kicker badge="出口 ④">活文档 ADR · 架构决策记录随代码生长</Kicker>
-      <PageTitle sub="每次 finalize,decision 事件会自动编译为 ADR。为什么这么写,不再散落在聊天记录里,而是沉淀成可导出的活文档。">
-        活文档 ADR
+      <Kicker badge="活文档 ADR">从任务事件编译出的架构选择</Kicker>
+      <PageTitle sub="把为什么这样做留在代码旁边，并保留背景、决定和影响。">
+        决策
       </PageTitle>
 
       {/* 顶部工具条 */}

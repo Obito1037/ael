@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Palette } from "lucide-react";
+import { Check, SunMoon } from "lucide-react";
 import { useStore } from "../store";
 import { THEMES } from "../themes";
 import { cx } from "../lib/format";
@@ -8,7 +8,7 @@ function Swatches({ swatch }: { swatch: [string, string, string, string] }) {
   const [bg, panel, accent, ink] = swatch;
   return (
     <span
-      className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-md ring-1 ring-black/20"
+      className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full ring-1 ring-ink/10"
       style={{ background: bg }}
     >
       <span className="grid h-full w-full grid-cols-2 grid-rows-2">
@@ -21,7 +21,7 @@ function Swatches({ swatch }: { swatch: [string, string, string, string] }) {
   );
 }
 
-/** 侧栏底部的主题切换器 —— 点开像 VSCode 的主题选择弹层。 */
+/** 侧栏底部的主题切换器。 */
 export function ThemePicker() {
   const theme = useStore((s) => s.theme);
   const setTheme = useStore((s) => s.setTheme);
@@ -49,19 +49,19 @@ export function ThemePicker() {
       <button
         onClick={() => setOpen((v) => !v)}
         className={cx(
-          "flex w-full items-center gap-2.5 rounded-lg border border-ink/10 px-3 py-2 text-[12.5px] transition-colors",
-          open ? "bg-ink/[0.05] text-ink" : "text-ink/60 hover:bg-ink/[0.03] hover:text-ink/90",
+          "flex w-full items-center gap-2.5 rounded-lg border border-transparent px-3 py-2 text-[12px] transition-colors",
+          open ? "bg-panel2 text-ink" : "text-ink/52 hover:bg-panel2/70 hover:text-ink/82",
         )}
       >
-        <Palette className="h-[15px] w-[15px] text-orange" />
-        <span className="flex-1 text-left">主题</span>
+        <SunMoon className="h-[15px] w-[15px] text-ink/46" strokeWidth={1.7} />
+        <span className="flex-1 text-left">外观</span>
         <Swatches swatch={current.swatch} />
       </button>
 
       {open && (
-        <div className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[230px] animate-pop-in overflow-hidden rounded-xl border border-ink/12 bg-panel shadow-2xl">
-          <div className="border-b border-ink/10 px-3 py-2 font-mono text-[10px] tracking-kicker text-ink/40">
-            APPEARANCE · 主题配色
+        <div className="glass-surface absolute bottom-[calc(100%+8px)] left-0 z-50 w-[230px] animate-pop-in overflow-hidden rounded-[20px]">
+          <div className="border-b border-line px-3 py-2.5 text-[10px] tracking-[0.12em] text-ink/38">
+            外观
           </div>
           <div className="max-h-[320px] overflow-y-auto p-1.5">
             {THEMES.map((t) => {
@@ -74,14 +74,14 @@ export function ThemePicker() {
                     setOpen(false);
                   }}
                   className={cx(
-                    "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
-                    active ? "bg-ink/[0.06]" : "hover:bg-ink/[0.04]",
+                    "flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition-colors",
+                    active ? "bg-panel2" : "hover:bg-panel2/70",
                   )}
                 >
                   <Swatches swatch={t.swatch} />
                   <span className="flex-1">
-                    <span className="block text-[13px] text-ink/90">{t.name}</span>
-                    <span className="font-mono text-[10px] text-ink/35">
+                    <span className="block text-[12px] text-ink/86">{t.name}</span>
+                    <span className="text-[9.5px] text-ink/34">
                       {t.kind === "light" ? "浅色" : "深色"}
                     </span>
                   </span>

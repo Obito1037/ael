@@ -57,8 +57,8 @@ export function Tasks() {
 
   return (
     <div>
-      <Kicker badge="黑匣子">经验层内核 · 每个任务一条可追责的证据链</Kicker>
-      <PageTitle sub="任务是治理的最小单元。左侧挑一个任务,右侧看它的目标、仓库锚点与逐条证据 —— 谁在什么时候、为什么、动了哪一行。">
+      <Kicker badge="历史与证据">每个任务都有完整来源链</Kicker>
+      <PageTitle sub="查看目标、仓库、Agent 会话和逐条证据；从这里继续、收尾或导出。">
         任务
       </PageTitle>
 
