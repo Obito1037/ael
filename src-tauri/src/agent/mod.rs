@@ -17,6 +17,7 @@ use crate::db::Db;
 use crate::engine::policy::PolicyGate;
 use crate::engine::{normalize, redact};
 use crate::error::{AelError, AelResult};
+use crate::util::silent_command;
 use crate::models::{
     BudgetStatus, DecidedBy, NewPolicyDecision, PendingCommand, PolicyAction, PolicyDecision,
     PolicyVerdictKind, TaskEvent,
@@ -27,8 +28,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{
+    mpsc::{sync_channel, SyncSender, TrySendError},
+    Arc, Mutex,
+};
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
@@ -43,6 +46,7 @@ const GATE_BUDGET_EVENT: &str = "gate://budget";
 const SIGNATURE_HIT_EVENT: &str = "guard://signature-hit";
 
 const BUDGET_RULE_ID: &str = "budget";
+const OUTPUT_QUEUE_CAPACITY: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,9 +258,11 @@ enum BudgetPhase {
 
 struct RuntimeSession {
     session: AgentSession,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+    output_tx: Option<SyncSender<String>>,
+    dropped_output: u64,
     chunks: Vec<TerminalChunk>,
     pending_output: String,
     auto_ingest: bool,
@@ -280,6 +286,8 @@ struct PendingHold {
 pub struct AgentRuntime {
     sessions: Mutex<HashMap<String, RuntimeSession>>,
     pending: Mutex<HashMap<String, PendingHold>>,
+    /// xterm 会逐键发送输入；这里保留尚未按回车提交的行，用于在提交时做完整策略判定。
+    input_lines: Mutex<HashMap<String, String>>,
 }
 
 impl AgentRuntime {
@@ -414,6 +422,10 @@ impl AgentRuntime {
             }
         };
 
+        let writer = Arc::new(Mutex::new(writer));
+        let child = Arc::new(Mutex::new(child));
+        let (output_tx, output_rx) = sync_channel::<String>(OUTPUT_QUEUE_CAPACITY);
+
         session.status = AgentSessionStatus::Running;
         session.updated_at = now_iso();
         db.update_agent_session(&session)?;
@@ -424,9 +436,11 @@ impl AgentRuntime {
                 session_id.clone(),
                 RuntimeSession {
                     session: session.clone(),
-                    writer,
+                    writer: writer.clone(),
                     master: pair.master,
-                    child,
+                    child: child.clone(),
+                    output_tx: Some(output_tx),
+                    dropped_output: 0,
                     chunks: Vec::new(),
                     pending_output: String::new(),
                     auto_ingest: opts.auto_ingest.unwrap_or(true),
@@ -447,6 +461,42 @@ impl AgentRuntime {
 
         self.push_system_chunk(db, &app, &session_id, "Agent session started.\r\n")?;
 
+        // PTY reader 只负责快速读取并入队。数据库写入、解析和事件广播在
+        // 独立 worker 中完成，避免高输出量时阻塞 PTY 和 Tauri 命令线程。
+        let worker_app = app.clone();
+        let worker_session_id = session_id.clone();
+        thread::spawn(move || {
+            while let Ok(text) = output_rx.recv() {
+                let Some(state) = worker_app.try_state::<crate::state::AppState>() else {
+                    break;
+                };
+                let dropped = state.agents.take_dropped_output(&worker_session_id);
+                if dropped > 0 {
+                    let _ = state.agents.push_system_chunk(
+                        &state.db,
+                        &worker_app,
+                        &worker_session_id,
+                        &format!(
+                            "[AEL] 输出过载，已丢弃 {dropped} 个终端块；请降低日志级别或扩大采样间隔。\r\n"
+                        ),
+                    );
+                }
+                let lines = state.agents.push_output_chunk(
+                    &state.db,
+                    &worker_app,
+                    &worker_session_id,
+                    text,
+                );
+                if !lines.trim().is_empty() {
+                    state.agents.ingest_completed_lines(
+                        &worker_app,
+                        &worker_session_id,
+                        &lines,
+                    );
+                }
+            }
+        });
+
         let read_app = app.clone();
         let read_session_id = session_id.clone();
         thread::spawn(move || {
@@ -457,19 +507,7 @@ impl AgentRuntime {
                     Ok(n) => {
                         let text = String::from_utf8_lossy(&buffer[..n]).to_string();
                         if let Some(state) = read_app.try_state::<crate::state::AppState>() {
-                            let lines = state.agents.push_output_chunk(
-                                &state.db,
-                                &read_app,
-                                &read_session_id,
-                                text,
-                            );
-                            if !lines.trim().is_empty() {
-                                state.agents.ingest_completed_lines(
-                                    &read_app,
-                                    &read_session_id,
-                                    &lines,
-                                );
-                            }
+                            state.agents.enqueue_output_chunk(&read_session_id, text);
                         } else {
                             break;
                         }
@@ -479,13 +517,7 @@ impl AgentRuntime {
             }
 
             if let Some(state) = read_app.try_state::<crate::state::AppState>() {
-                let _ = state.agents.mark_session_status(
-                    &state.db,
-                    &read_app,
-                    &read_session_id,
-                    AgentSessionStatus::Exited,
-                    None,
-                );
+                state.agents.finish_reader_session(&state.db, &read_app, &read_session_id);
             }
         });
 
@@ -508,17 +540,36 @@ impl AgentRuntime {
         session_id: &str,
         text: String,
     ) -> AelResult<()> {
-        let is_submit = (text.contains('\n') || text.contains('\r')) && gate.apply_to_input();
+        if !gate.apply_to_input() {
+            if text.contains('\r') || text.contains('\n') {
+                self.input_lines
+                    .lock()
+                    .expect("input line mutex poisoned")
+                    .remove(session_id);
+            }
+            return self.send_input_raw(db, app, session_id, text);
+        }
+
+        let (command_line, is_submit, had_buffered_prefix) =
+            self.track_input_line(session_id, &text)?;
         if !is_submit {
-            // 单个控制键 / 半行输入:透传,不裁决。
+            // xterm 的单个字符 / 控制键仍需即时透传；回车提交时再对整行裁决。
             return self.send_input_raw(db, app, session_id, text);
         }
 
         let task_id = self.session_task_id(session_id)?;
-        let command_line = text.trim().to_string();
+        let command_line = command_line.trim().to_string();
         if command_line.is_empty() {
             return self.send_input_raw(db, app, session_id, text);
         }
+
+        // 逐键输入时，命令前缀已经进入交互 Shell 的编辑缓冲区；在 hold/deny
+        // 前先发 Ctrl-C 清掉它，避免人工裁决前被回车意外执行或审批后重复拼接。
+        let cancel_buffer = |this: &Self| {
+            if had_buffered_prefix {
+                let _ = this.send_input_raw(db, app, session_id, "\u{3}".to_string());
+            }
+        };
 
         // 预算熔断优先。
         let (budget_enabled, _, _) = gate.budget_params();
@@ -562,11 +613,12 @@ impl AgentRuntime {
                 Ok(())
             }
             PolicyAction::Hold => {
+                cancel_buffer(self);
                 let rule = verdict.rule_id.clone().unwrap_or_default();
                 let pending = self.enqueue_hold(
                     session_id,
                     &task_id,
-                    &text,
+                    &format!("{command_line}\r\n"),
                     &rule,
                     &verdict.reason,
                     gate.hold_timeout_secs(),
@@ -585,6 +637,7 @@ impl AgentRuntime {
                 Ok(())
             }
             PolicyAction::Deny => {
+                cancel_buffer(self);
                 let rule = verdict.rule_id.clone().unwrap_or_default();
                 self.record_decision(
                     db,
@@ -618,13 +671,26 @@ impl AgentRuntime {
         session_id: &str,
         text: String,
     ) -> AelResult<()> {
+        let writer = {
+            let sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
+            sessions
+                .get(session_id)
+                .map(|session| session.writer.clone())
+                .ok_or_else(|| AelError::not_found(format!("session {session_id} 不存在")))?
+        };
+
+        // PTY 写入可能阻塞，但不再占用 sessions 总锁，其他会话仍可查询、停止和调整尺寸。
+        {
+            let mut writer = writer.lock().expect("agent writer mutex poisoned");
+            writer.write_all(text.as_bytes())?;
+            writer.flush()?;
+        }
+
         let chunk = {
             let mut sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| AelError::not_found(format!("session {session_id} 不存在")))?;
-            session.writer.write_all(text.as_bytes())?;
-            session.writer.flush()?;
             session.input_chars += text.chars().count() as u64;
             make_chunk(session, TerminalDirection::Input, text)
         };
@@ -657,17 +723,19 @@ impl AgentRuntime {
         session_id: &str,
         kill_tree: bool,
     ) -> AelResult<AgentSession> {
-        {
-            let mut sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
-            let session = sessions
-                .get_mut(session_id)
-                .ok_or_else(|| AelError::not_found(format!("session {session_id} 不存在")))?;
-            if kill_tree {
-                session
-                    .child
-                    .kill()
-                    .map_err(|e| AelError::io_error(format!("停止 Agent 失败: {e}")))?;
-            }
+        let child = {
+            let sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
+            sessions
+                .get(session_id)
+                .map(|session| session.child.clone())
+                .ok_or_else(|| AelError::not_found(format!("session {session_id} 不存在")))?
+        };
+        if kill_tree {
+            child
+                .lock()
+                .expect("agent child mutex poisoned")
+                .kill()
+                .map_err(|e| AelError::io_error(format!("停止 Agent 失败: {e}")))?;
         }
         self.mark_session_status(db, app, session_id, AgentSessionStatus::Killed, None)
     }
@@ -732,7 +800,24 @@ impl AgentRuntime {
 
         let command_line = hold.text.trim().to_string();
         if approve {
-            self.send_input_raw(db, app, &hold.session_id, hold.text.clone())?;
+            if let Err(error) = self.send_input_raw(db, app, &hold.session_id, hold.text.clone()) {
+                // 会话可能在人工点击前已退出；仍把这次裁决写入账本，避免出现“待处理
+                // 消失但没有结局”的悬空记录。
+                let _ = self.record_decision(
+                    db,
+                    app,
+                    Some(&hold.session_id),
+                    Some(&hold.task_id),
+                    &hold.rule_id,
+                    PolicyAction::Hold,
+                    PolicyVerdictKind::AutoDenied,
+                    &command_line,
+                    &format!("会话已结束，无法放行: {}", error),
+                    DecidedBy::Policy,
+                    true,
+                );
+                return Err(error);
+            }
             let d = self.record_decision(
                 db,
                 app,
@@ -796,6 +881,130 @@ impl AgentRuntime {
     }
 
     // ── 内部:输出处理 ──────────────────────────────────────────
+
+    fn track_input_line(
+        &self,
+        session_id: &str,
+        text: &str,
+    ) -> AelResult<(String, bool, bool)> {
+        {
+            let sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
+            if !sessions.contains_key(session_id) {
+                return Err(AelError::not_found(format!("session {session_id} 不存在")));
+            }
+        }
+
+        let mut lines = self.input_lines.lock().expect("input line mutex poisoned");
+        let line = lines.entry(session_id.to_string()).or_default();
+        let had_prefix = !line.is_empty();
+        if text.contains('\r') || text.contains('\n') {
+            // 粘贴多行时整段作为一次候选命令评估，不能只检查第一行后把
+            // 后续危险行一并透传。
+            let command = format!("{line}{text}");
+            line.clear();
+            return Ok((command, true, had_prefix));
+        }
+        let mut escaped = false;
+        let mut submitted = false;
+        for ch in text.chars() {
+            if submitted {
+                // 粘贴多行时，后续内容会由下一次输入重新建立缓冲，避免把多条命令
+                // 合并成一条裁决记录。
+                continue;
+            }
+            match ch {
+                '\u{1b}' => {
+                    // 方向键 / TUI 控制序列无法可靠还原编辑结果，清空本地镜像，
+                    // 仍透传原始按键；需要严格裁决的完整命令请用下方输入框。
+                    escaped = true;
+                    line.clear();
+                }
+                '\r' | '\n' => {
+                    submitted = true;
+                }
+                '\u{3}' => {
+                    line.clear();
+                    escaped = false;
+                }
+                '\u{8}' | '\u{7f}' => {
+                    if !escaped {
+                        line.pop();
+                    }
+                }
+                c if !escaped && !c.is_control() => line.push(c),
+                _ => {}
+            }
+        }
+
+        if submitted {
+            let command = std::mem::take(line);
+            Ok((command, true, had_prefix))
+        } else {
+            Ok((String::new(), false, had_prefix))
+        }
+    }
+
+    /// 非阻塞地把 PTY 输出放入有界队列。队列满时丢弃当前块并累计计数，
+    /// 由 worker 在恢复消费后写入一条可见告警，避免 reader 被慢速磁盘拖死。
+    fn enqueue_output_chunk(&self, session_id: &str, text: String) {
+        let mut sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
+        let Some(session) = sessions.get_mut(session_id) else {
+            return;
+        };
+        let Some(sender) = session.output_tx.as_ref() else {
+            return;
+        };
+        match sender.try_send(text) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                session.dropped_output = session.dropped_output.saturating_add(1);
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                session.output_tx = None;
+            }
+        }
+    }
+
+    fn take_dropped_output(&self, session_id: &str) -> u64 {
+        let mut sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
+        sessions
+            .get_mut(session_id)
+            .map(|session| std::mem::take(&mut session.dropped_output))
+            .unwrap_or(0)
+    }
+
+    /// reader EOF 后等待真实子进程状态；若会话已被 stop 标记为 killed，则不覆盖该终态。
+    fn finish_reader_session(&self, db: &Db, app: &AppHandle, session_id: &str) {
+        let child = {
+            let sessions = self.sessions.lock().expect("agent runtime mutex poisoned");
+            let Some(session) = sessions.get(session_id) else {
+                return;
+            };
+            if !matches!(
+                session.session.status,
+                AgentSessionStatus::Starting
+                    | AgentSessionStatus::Running
+                    | AgentSessionStatus::Waiting
+                    | AgentSessionStatus::Blocked
+            ) {
+                return;
+            }
+            session.child.clone()
+        };
+
+        let exit_code = child
+            .lock()
+            .ok()
+            .and_then(|mut child| child.wait().ok())
+            .map(|status| status.exit_code() as i32);
+        let _ = self.mark_session_status(
+            db,
+            app,
+            session_id,
+            AgentSessionStatus::Exited,
+            exit_code,
+        );
+    }
 
     fn push_output_chunk(&self, db: &Db, app: &AppHandle, session_id: &str, text: String) -> String {
         let (chunk, completed_lines) = {
@@ -1149,6 +1358,8 @@ impl AgentRuntime {
                 session.session.status,
                 AgentSessionStatus::Exited | AgentSessionStatus::Killed | AgentSessionStatus::Failed
             ) {
+                // 关闭 worker 的发送端；worker 会先消费队列中剩余输出，再自然退出。
+                session.output_tx.take();
                 session.session.ended_at = Some(session.session.updated_at.clone());
                 session.session.exit_code = exit_code;
             }
@@ -1159,6 +1370,10 @@ impl AgentRuntime {
             snapshot.status,
             AgentSessionStatus::Exited | AgentSessionStatus::Killed | AgentSessionStatus::Failed
         ) {
+            self.input_lines
+                .lock()
+                .expect("input line mutex poisoned")
+                .remove(session_id);
             let _ = db.release_workspace_locks_for_session(session_id);
         }
 
@@ -1266,9 +1481,9 @@ fn resolve_executable(name: &str) -> Option<PathBuf> {
     }
 
     #[cfg(windows)]
-    let output = Command::new("where.exe").arg(name).output().ok()?;
+    let output = silent_command("where.exe").arg(name).output().ok()?;
     #[cfg(not(windows))]
-    let output = Command::new("which").arg(name).output().ok()?;
+    let output = silent_command("which").arg(name).output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -1282,7 +1497,7 @@ fn resolve_executable(name: &str) -> Option<PathBuf> {
 }
 
 fn read_version(executable: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new(executable).args(args).output().ok()?;
+    let output = silent_command(executable).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }

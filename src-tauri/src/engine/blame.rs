@@ -8,7 +8,7 @@ use crate::error::{AelError, AelResult};
 use crate::models::{
     AgentSessionSummary, BlameReport, CommitLink, EventActor, EventKind, NewCommitLink, TaskEvent,
 };
-use std::process::Command;
+use crate::util::silent_command;
 
 const TRAILER_KEY: &str = "AEL-Task:";
 const LOG_SCAN_LIMIT: usize = 500;
@@ -173,7 +173,7 @@ fn git_blame_line(repo_path: &str, file: &str, line: u32) -> AelResult<(String, 
 }
 
 fn run_git(repo_path: &str, args: &[&str]) -> AelResult<String> {
-    let output = Command::new("git")
+    let output = silent_command("git")
         .arg("-C")
         .arg(repo_path)
         .args(args)

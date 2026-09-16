@@ -77,3 +77,56 @@ fn pack_then_unpack_roundtrip_preserves_events() {
     assert_eq!(task.status, TaskStatus::Verified, "状态对齐");
     assert_eq!(task.tags.len(), 3, "标签往返无损");
 }
+
+#[test]
+fn evidence_files_are_embedded_and_materialized_on_import() {
+    let s = common::temp_state();
+    let id = seed(&s);
+    let evidence_path = s.db.paths.root.join("verification.txt");
+    std::fs::write(&evidence_path, "cargo test: 40 passed\n").unwrap();
+    s.db
+        .append_event(NewEvent::basic(
+            id.clone(),
+            EventKind::Verification,
+            "测试证据",
+            None,
+            Some(evidence_path.to_string_lossy().to_string()),
+        ))
+        .unwrap();
+
+    let path = export_handover(&s, &id, None).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let mut zip = zip::ZipArchive::new(file).unwrap();
+    let mut manifest_text = String::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_string(&mut manifest_text)
+        .unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).unwrap();
+    let reference = manifest["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["summary"] == "测试证据")
+        .and_then(|event| event["evidence_ref"].as_str())
+        .unwrap();
+    assert!(reference.starts_with("evidence/"));
+    let mut embedded = String::new();
+    zip.by_name(reference)
+        .unwrap()
+        .read_to_string(&mut embedded)
+        .unwrap();
+    assert_eq!(embedded, "cargo test: 40 passed\n");
+
+    let new_id = import_handover(&s, path.to_str().unwrap()).unwrap();
+    let imported_event = s
+        .db
+        .list_events(&new_id)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.summary == "测试证据")
+        .unwrap();
+    let imported_ref = imported_event.evidence_ref.unwrap();
+    assert!(std::path::Path::new(&imported_ref).is_file());
+    assert_eq!(std::fs::read_to_string(imported_ref).unwrap(), embedded);
+}

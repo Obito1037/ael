@@ -24,7 +24,7 @@ type SettingsSection = "general" | "memory" | "agents" | "safety";
 
 const RETRIEVAL_LABEL: Record<RetrievalMode, string> = {
   keyword: "关键词",
-  hybrid: "混合（关键词 + 向量）",
+  hybrid: "混合（关键词 + 规则相似度）",
 };
 
 function SettingRow({ icon, label, hint, children }: { icon: ReactNode; label: string; hint?: string; children: ReactNode }) {
@@ -42,6 +42,7 @@ export function SettingsView() {
   const theme = useStore((state) => state.theme);
   const setTheme = useStore((state) => state.setTheme);
   const tasks = useStore((state) => state.tasks);
+  const setTasks = useStore((state) => state.setTasks);
   const [section, setSection] = useState<SettingsSection>("general");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [form, setForm] = useState<Settings | null>(null);
@@ -50,11 +51,25 @@ export function SettingsView() {
   const [agents, setAgents] = useState<AgentProfile[]>([]);
   const [detecting, setDetecting] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [handoverTaskId, setHandoverTaskId] = useState("");
+  const [handoverPath, setHandoverPath] = useState("");
+  const [policyText, setPolicyText] = useState("");
+  const [providerCount, setProviderCount] = useState(0);
+  const [mcpCount, setMcpCount] = useState(0);
+  const [backupReady, setBackupReady] = useState(false);
 
   useEffect(() => {
     ipc.getSettings().then((next) => { setSettings(next); setForm(next); }).catch(() => toast("读取设置失败。", "error"));
+    ipc.gateGetPolicyText().then(setPolicyText).catch(() => setPolicyText(""));
+    ipc.listProviders().then((items) => setProviderCount(items.length)).catch(() => setProviderCount(0));
+    ipc.listMcpServers().then((items) => setMcpCount(items.length)).catch(() => setMcpCount(0));
     void detect();
   }, []);
+
+  useEffect(() => {
+    if (!handoverTaskId && tasks[0]) setHandoverTaskId(tasks[0].id);
+  }, [handoverTaskId, tasks]);
 
   const detect = async () => {
     setDetecting(true);
@@ -80,13 +95,13 @@ export function SettingsView() {
 
   const backup = async () => {
     setBacking(true);
-    try { const { path } = await ipc.backupNow(); toast(`已备份至 ${path}`, "success"); }
+    try { const { path } = await ipc.backupNow(); setBackupReady(true); toast(`已备份至 ${path}`, "success"); }
     catch { toast("备份失败。", "error"); }
     finally { setBacking(false); }
   };
 
   const exportHandover = async () => {
-    const task = tasks[0];
+    const task = tasks.find((item) => item.id === handoverTaskId) || tasks[0];
     if (!task) return toast("还没有可导出的任务。", "warning");
     setExporting(true);
     try {
@@ -94,6 +109,23 @@ export function SettingsView() {
       toast(`交接包已生成：${path}`, "success");
     } catch { toast("交接包生成失败。", "error"); }
     finally { setExporting(false); }
+  };
+
+  const importHandover = async () => {
+    const path = handoverPath.trim();
+    if (!path) return toast("请先粘贴 handover.zip 路径。", "warning");
+    setImporting(true);
+    try {
+      const { taskId } = await ipc.importHandover(path);
+      setTasks(await ipc.listTasks());
+      setHandoverTaskId(taskId);
+      setHandoverPath("");
+      toast(`交接包已导入，新任务：${taskId}`, "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "交接包导入失败。", "error");
+    } finally {
+      setImporting(false);
+    }
   };
 
   const readyAgents = agents.filter((agent) => agent.available).length;
@@ -146,8 +178,8 @@ export function SettingsView() {
                   <SettingRow icon={<ShieldCheck className="h-3.5 w-3.5" />} label="Guard 命中阈值" hint="低分历史失败不会触发建议">
                     <div className="flex items-center gap-3"><input type="range" min={0} max={1} step={0.05} value={form?.guardMinScore ?? 0} onChange={(event) => patch("guardMinScore", Number(event.target.value))} className="h-1.5 flex-1 accent-orange" /><span className="w-10 font-mono text-[11px] text-orange">{(form?.guardMinScore ?? 0).toFixed(2)}</span></div>
                   </SettingRow>
-                  <SettingRow icon={<Database className="h-3.5 w-3.5" />} label="上下文预算" hint="当前由运行时策略管理"><span className="block text-right font-mono text-[10.5px] text-ink/48">8,000 tokens</span></SettingRow>
-                  <SettingRow icon={<RefreshCw className="h-3.5 w-3.5" />} label="衰减与重验" hint="依赖或模型变化时自动降权"><span className="block text-right text-[10.5px] text-green">已启用</span></SettingRow>
+                  <SettingRow icon={<Database className="h-3.5 w-3.5" />} label="上下文预算" hint="由 policy.toml 的 budget 段控制"><span className="block text-right text-[10.5px] text-ink/48">以运行时策略为准</span></SettingRow>
+                  <SettingRow icon={<RefreshCw className="h-3.5 w-3.5" />} label="衰减与重验" hint="当前提供手动重验入口"><span className="block text-right text-[10.5px] text-amber">需手动运行</span></SettingRow>
                 </>
               )}
 
@@ -165,8 +197,8 @@ export function SettingsView() {
               {section === "safety" && (
                 <>
                   <SettingRow icon={<ShieldCheck className="h-3.5 w-3.5" />} label="信任等级" hint="危险操作仍需人工确认"><span className="block text-right text-[10.5px] text-ink/52">中</span></SettingRow>
-                  <SettingRow icon={<ShieldCheck className="h-3.5 w-3.5" />} label="提示注入防护"><span className="block text-right text-[10.5px] text-green">On</span></SettingRow>
-                  <SettingRow icon={<RefreshCw className="h-3.5 w-3.5" />} label="启动前自检"><span className="block text-right text-[10.5px] text-green">On</span></SettingRow>
+                  <SettingRow icon={<ShieldCheck className="h-3.5 w-3.5" />} label="提示注入防护" hint="由运行时策略和 Agent 行为共同决定"><span className="block text-right text-[10.5px] text-ink/52">策略控制</span></SettingRow>
+                  <SettingRow icon={<RefreshCw className="h-3.5 w-3.5" />} label="启动前自检" hint="当前为手动探测，不会阻塞启动"><span className="block text-right text-[10.5px] text-amber">手动触发</span></SettingRow>
                   <SettingRow icon={<HardDrive className="h-3.5 w-3.5" />} label="执行策略" hint="policy.toml"><button type="button" onClick={() => useStore.getState().setView("gate")} className="flex w-full items-center justify-end gap-2 text-[10.5px] text-orange">打开策略与命令试判 <ChevronRight className="h-3.5 w-3.5" /></button></SettingRow>
                 </>
               )}
@@ -183,17 +215,26 @@ export function SettingsView() {
             <h3 className="font-serif text-[18px]">交接状态</h3>
             <div className="mt-5 space-y-3">
               {[
-                ["数据库", true, "正常"],
-                ["最新备份", true, "已配置"],
+                ["数据库", !!settings, settings ? "已连接" : "检查中"],
+                ["最新备份", backupReady, backupReady ? "本次已生成" : "尚未验证"],
                 ["Adapters", readyAgents === agents.length && agents.length > 0, `${readyAgents} / ${agents.length} 就绪`],
-                ["执行策略", true, "已配置"],
+                ["Provider / MCP", providerCount + mcpCount > 0, `${providerCount} / ${mcpCount} 已配置`],
+                ["执行策略", policyText.trim().length > 0, policyText.trim() ? "已加载" : "未加载"],
               ].map(([label, ok, value]) => (
                 <div key={String(label)} className="flex items-center gap-2 text-[10.5px]"><span className={cx("grid h-4 w-4 place-items-center rounded-full", ok ? "bg-green/[0.1] text-green" : "bg-amber/[0.1] text-amber")}>{ok ? <Check className="h-2.5 w-2.5" /> : "!"}</span><span className="flex-1 text-ink/52">{label}</span><span className={ok ? "text-green" : "text-amber"}>{value}</span></div>
               ))}
             </div>
             <div className="mt-6 rounded-xl bg-panel px-4 py-3 text-[10px] leading-relaxed text-ink/40">建议在交接 Agent 前运行自检，确认本地数据库、适配器和策略都能被目标环境读取。</div>
             <Button variant="ghost" className="mt-5 w-full" onClick={detect} disabled={detecting}>{detecting ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />}运行自检</Button>
-            <Button variant="primary" className="mt-2 w-full" onClick={exportHandover} disabled={exporting || tasks.length === 0}>{exporting ? <Spinner /> : null}{exporting ? "生成中…" : "生成交接包"}</Button>
+            <div className="mt-4 space-y-2 border-t border-line pt-4">
+              <select value={handoverTaskId} onChange={(event) => setHandoverTaskId(event.target.value)} className={inputCls} disabled={tasks.length === 0}>
+                {tasks.length === 0 && <option value="">没有可用任务</option>}
+                {tasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}
+              </select>
+              <Button variant="primary" className="w-full" onClick={exportHandover} disabled={exporting || tasks.length === 0}>{exporting ? <Spinner /> : null}{exporting ? "生成中…" : "生成交接包"}</Button>
+              <input value={handoverPath} onChange={(event) => setHandoverPath(event.target.value)} placeholder="粘贴 handover.zip 路径" className={cx(inputCls, "font-mono text-[10px]")} />
+              <Button variant="ghost" className="w-full" onClick={importHandover} disabled={importing || !handoverPath.trim()}>{importing ? <Spinner /> : null}{importing ? "导入中…" : "导入交接包"}</Button>
+            </div>
           </aside>
         </div>
       </Panel>

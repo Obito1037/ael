@@ -44,6 +44,10 @@ pnpm tauri dev
 pnpm dev   # 打开 http://localhost:1420
 ```
 
+## 使用说明
+
+面向使用者的安装、首个任务、Agent 运行、记忆沉淀、交接和故障排查步骤见 [`docs/AEL-使用说明.md`](docs/AEL-使用说明.md)。
+
 ## 构建
 
 ```bash

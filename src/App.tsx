@@ -47,7 +47,6 @@ type NavItem = {
 };
 
 const NAV: NavItem[] = [
-  { id: "overview", label: "新建任务", icon: Plus, description: "目标与记忆注入预览" },
   { id: "console", label: "工作台", icon: TerminalSquare, description: "当前 Agent 会话" },
   { id: "memory", label: "记忆", icon: Sparkles, description: "复用、纠错与遗忘" },
   { id: "agents", label: "Agent 中心", icon: Network, description: "Provider、配置与 MCP" },
@@ -100,6 +99,13 @@ export default function App() {
     [sessions],
   );
   const activeBudget = running[0] ? budgets[running[0].id] : undefined;
+  const recentTasks = useMemo(
+    () =>
+      [...tasks]
+        .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+        .slice(0, 50),
+    [tasks],
+  );
 
   useEffect(() => {
     const store = useStore.getState();
@@ -192,7 +198,7 @@ export default function App() {
         <div className="nav-drawer-layer" role="presentation">
           <button type="button" className="nav-drawer-backdrop" aria-label="关闭导航" onClick={() => setDrawerOpen(false)} />
           <aside className="nav-drawer glass-surface">
-            <div className="flex items-center justify-between px-5 pt-5">
+            <div className="nav-drawer-header flex items-center justify-between px-5 pt-5">
               <div>
                 <div className="font-serif text-[30px] tracking-[0.05em]">AEL</div>
                 <div className="mt-0.5 text-[13px] text-ink/42">智创 OPC · 本地记忆工作台</div>
@@ -208,45 +214,53 @@ export default function App() {
               </button>
             </div>
 
-            <nav className="mt-4 space-y-1 px-3">
-              {NAV.map((item) => {
-                const Icon = item.icon;
-                return (
+            <div className="nav-drawer-scroll">
+              <nav className="mt-4 space-y-1 px-3">
+                {NAV.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      type="button"
+                      key={item.id}
+                      onClick={() => navigate(item.id)}
+                      className={cx("drawer-nav-row", view === item.id && "is-active")}
+                    >
+                      <Icon className="h-5 w-5" strokeWidth={1.6} />
+                      <span className="min-w-0 flex-1 truncate text-left text-[16px] text-ink/78">{item.label}</span>
+                    </button>
+                  );
+                })}
+              </nav>
+
+              <div className="nav-section-label mx-3 mt-6">最近任务</div>
+              <div className="mt-2 space-y-0.5 px-3">
+                {recentTasks.length === 0 && <div className="px-3 py-4 text-[13px] text-ink/35">还没有任务</div>}
+                {recentTasks.map((task) => (
                   <button
                     type="button"
-                    key={item.id}
-                    onClick={() => navigate(item.id)}
-                    className={cx("drawer-nav-row", view === item.id && "is-active")}
+                    key={task.id}
+                    onClick={() => {
+                      goTask(task.id);
+                      setDrawerOpen(false);
+                    }}
+                    className="drawer-recent-row"
                   >
-                    <Icon className="h-5 w-5" strokeWidth={1.6} />
-                    <span className="min-w-0 flex-1 truncate text-left text-[16px] text-ink/78">{item.label}</span>
+                    <span className={cx("mt-1.5 h-1.5 w-1.5 rounded-full", task.status === "in_progress" ? "bg-orange" : "bg-green")} />
+                    <span className="min-w-0 flex-1 text-left">
+                      <span className="block truncate text-[15.5px] text-ink/72">{task.title}</span>
+                      <span className="block text-[12px] text-ink/36">{timeAgo(task.updatedAt)}</span>
+                    </span>
                   </button>
-                );
-              })}
-            </nav>
-
-            <div className="nav-section-label mx-3 mt-6">最近任务</div>
-            <div className="mt-2 space-y-0.5 px-3">
-              {tasks.slice(0, 4).map((task) => (
-                <button
-                  type="button"
-                  key={task.id}
-                  onClick={() => {
-                    goTask(task.id);
-                    setDrawerOpen(false);
-                  }}
-                  className="drawer-recent-row"
-                >
-                  <span className={cx("mt-1.5 h-1.5 w-1.5 rounded-full", task.status === "in_progress" ? "bg-orange" : "bg-green")} />
-                  <span className="min-w-0 flex-1 text-left">
-                    <span className="block truncate text-[15.5px] text-ink/72">{task.title}</span>
-                    <span className="block text-[12px] text-ink/36">{timeAgo(task.updatedAt)}</span>
-                  </span>
-                </button>
-              ))}
+                ))}
+                {tasks.length > recentTasks.length && (
+                  <button type="button" onClick={() => navigate("tasks")} className="drawer-recent-more">
+                    查看全部 {tasks.length} 个任务 →
+                  </button>
+                )}
+              </div>
             </div>
 
-            <div className="mt-auto space-y-1 border-t border-line p-3">
+            <div className="nav-drawer-footer mt-auto space-y-1 border-t border-line p-3">
               <button type="button" onClick={() => navigate("gate")} className="drawer-nav-row">
                 <ShieldCheck className="h-5 w-5" />
                 <span className="flex-1 text-left text-[15px]">安全</span>

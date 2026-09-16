@@ -25,6 +25,7 @@ import type {
   AgentSession,
   ParsedEventPayload,
   Skill,
+  SessionStatusPayload,
   TerminalChunk,
   TerminalChunkPayload,
 } from "../types";
@@ -40,6 +41,8 @@ const xtermTheme = () => ({
   black: cssColor("--c-bg"),
   brightBlack: cssColor("--c-ink", 0.35),
 });
+
+const TERMINAL_UI_QUEUE_MAX_CHARS = 1_000_000;
 
 export function Console() {
   const tasks = useStore((state) => state.tasks);
@@ -66,6 +69,12 @@ export function Console() {
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const activeIdRef = useRef<string | null>(null);
+  const terminalWriteQueueRef = useRef<string[]>([]);
+  const terminalWriteQueuedCharsRef = useRef(0);
+  const terminalDroppedUiChunksRef = useRef(0);
+  const terminalWriteFrameRef = useRef<number | null>(null);
+  const parsedEventCountRef = useRef(0);
+  const parsedEventTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activePending = useMemo(() => pending.filter((item) => !active || item.sessionId === active.id), [pending, active]);
   const budget = active ? budgets[active.id] : undefined;
@@ -154,13 +163,32 @@ export function Console() {
     if (!isTauri()) return;
     const subscriptions = [
       listen<TerminalChunkPayload>("agent://terminal-chunk", (event) => {
-        if (event.payload.sessionId === activeIdRef.current) writeChunk(event.payload.chunk);
+        if (event.payload.sessionId === activeIdRef.current) queueChunk(event.payload.chunk);
+      }),
+      listen<SessionStatusPayload>("agent://session-status", (event) => {
+        if (event.payload.sessionId === activeIdRef.current) setActive(event.payload.session);
       }),
       listen<ParsedEventPayload>("agent://parsed-event", (event) => {
-        if (event.payload.sessionId === activeIdRef.current) toast(`证据入链：[${event.payload.event.kind}] ${event.payload.event.summary}`, "info");
+        if (event.payload.sessionId !== activeIdRef.current) return;
+        parsedEventCountRef.current += 1;
+        if (parsedEventTimerRef.current) return;
+        parsedEventTimerRef.current = setTimeout(() => {
+          const count = parsedEventCountRef.current;
+          parsedEventCountRef.current = 0;
+          parsedEventTimerRef.current = null;
+          toast(`证据入链：已记录 ${count} 条事件`, "info");
+        }, 250);
       }),
     ];
-    return () => subscriptions.forEach((promise) => promise.then((dispose) => dispose()).catch(() => {}));
+    return () => {
+      if (parsedEventTimerRef.current) clearTimeout(parsedEventTimerRef.current);
+      if (terminalWriteFrameRef.current != null) cancelAnimationFrame(terminalWriteFrameRef.current);
+      terminalWriteFrameRef.current = null;
+      terminalWriteQueueRef.current = [];
+      terminalWriteQueuedCharsRef.current = 0;
+      terminalDroppedUiChunksRef.current = 0;
+      subscriptions.forEach((promise) => promise.then((dispose) => dispose()).catch(() => {}));
+    };
   }, [toast]);
 
   const writeChunk = (chunk: TerminalChunk) => {
@@ -169,11 +197,43 @@ export function Console() {
     else termRef.current.write(chunk.text);
   };
 
+  const queueChunk = (chunk: TerminalChunk) => {
+    const text = chunk.direction === "system" ? `\x1b[38;5;208m${chunk.text}\x1b[0m` : chunk.text;
+    if (terminalWriteQueuedCharsRef.current + text.length > TERMINAL_UI_QUEUE_MAX_CHARS) {
+      terminalDroppedUiChunksRef.current += 1;
+      return;
+    }
+    terminalWriteQueueRef.current.push(text);
+    terminalWriteQueuedCharsRef.current += text.length;
+    if (terminalWriteFrameRef.current != null) return;
+    terminalWriteFrameRef.current = requestAnimationFrame(() => {
+      terminalWriteFrameRef.current = null;
+      const terminal = termRef.current;
+      if (!terminal) {
+        terminalWriteQueueRef.current = [];
+        terminalWriteQueuedCharsRef.current = 0;
+        return;
+      }
+      const batch = terminalWriteQueueRef.current.join("");
+      terminalWriteQueueRef.current = [];
+      terminalWriteQueuedCharsRef.current = 0;
+      const dropped = terminalDroppedUiChunksRef.current;
+      terminalDroppedUiChunksRef.current = 0;
+      if (dropped > 0) terminal.write(`\r\n\x1b[38;5;208m[AEL] UI 输出过载，已折叠 ${dropped} 个终端块。\x1b[0m\r\n`);
+      if (batch) terminal.write(batch);
+    });
+  };
+
   const attach = async (session: AgentSession) => {
     setActive(session);
     setTaskId(session.taskId);
     try {
       const snapshot = await ipc.getAgentSnapshot(session.id);
+      if (terminalWriteFrameRef.current != null) cancelAnimationFrame(terminalWriteFrameRef.current);
+      terminalWriteFrameRef.current = null;
+      terminalWriteQueueRef.current = [];
+      terminalWriteQueuedCharsRef.current = 0;
+      terminalDroppedUiChunksRef.current = 0;
       termRef.current?.clear();
       snapshot.chunks.forEach(writeChunk);
       fitRef.current?.fit();
@@ -218,8 +278,12 @@ export function Console() {
 
   const sendLine = async () => {
     if (!active || !input.trim()) return;
-    await ipc.sendAgentInput(active.id, `${input}\r\n`);
-    setInput("");
+    try {
+      await ipc.sendAgentInput(active.id, `${input}\r\n`);
+      setInput("");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "发送输入失败，请检查 Agent 会话。", "error");
+    }
   };
 
   const resolve = async (id: string, approve: boolean) => {

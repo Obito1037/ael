@@ -10,6 +10,15 @@
     "generated_at": { "type": "string", "format": "date-time" },
     "generated_by": { "type": "string", "description": "导出时的 agent_id" },
     "ael_version": { "type": "string", "description": "导出端 AEL 应用版本" },
+    "ahp_version": { "type": "string", "description": "Agent Handover Protocol 版本" },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agent": { "type": "string" },
+        "model": { "type": "string" }
+      }
+    },
 
     "task": {
       "type": "object",
@@ -67,6 +76,20 @@
       "type": "array",
       "description": "本任务踩过或需规避的失败模式",
       "items": { "type": "object" }
+    },
+    "adrs": {
+      "type": "array",
+      "description": "随包携带的架构决策记录",
+      "items": { "type": "object" }
+    },
+    "policy_decisions": {
+      "type": "array",
+      "description": "随包携带的策略裁决记录",
+      "items": { "type": "object" }
+    },
+    "brief_path": {
+      "type": "string",
+      "description": "包内 Review Brief 相对路径"
     },
     "open_questions": {
       "type": "array",

@@ -148,6 +148,19 @@ export interface BudgetStatus {
   breakerTripped: boolean;
 }
 
+export interface SessionTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  source: "agent_reported" | "transcript_estimate" | string;
+}
+
+export interface CompressResult {
+  compressed: string;
+  tokensBefore: number;
+  tokensAfter: number;
+}
+
 export interface AdrRecord {
   id: string;
   taskId?: string;

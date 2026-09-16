@@ -11,6 +11,7 @@ import type {
   AgentSnapshot,
   BlameReport,
   BudgetStatus,
+  CompressResult,
   CommitLink,
   Failure,
   FinalizeResult,
@@ -23,6 +24,7 @@ import type {
   ProviderConfig,
   ReviewBrief,
   Settings,
+  SessionTokenUsage,
   Skill,
   SkillStatus,
   Task,
@@ -38,8 +40,24 @@ export const isTauri = () =>
   (window as any).__TAURI_INTERNALS__ !== undefined;
 
 /** 在 Tauri 里走真实 invoke;浏览器预览走内存 mock。 */
+const IPC_TIMEOUT_MS = 30_000;
+
+async function invokeWithTimeout<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      invoke<T>(cmd, args),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`IPC 调用超时: ${cmd}`)), IPC_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function call<T>(cmd: string, args: Record<string, unknown>, fallback: () => T | Promise<T>): Promise<T> {
-  if (isTauri()) return invoke<T>(cmd, args);
+  if (isTauri()) return invokeWithTimeout<T>(cmd, args);
   return fallback();
 }
 
@@ -85,6 +103,23 @@ export const ipc = {
   // ── Skill / Failure ──────────────────────────────────
   listSkills: (a: { status?: SkillStatus; limit?: number; offset?: number } = {}) =>
     call<Skill[]>("list_skills", a, () => mock.listSkills(a)),
+
+  getSkill: (id: string) =>
+    call<Skill>("get_skill", { id }, () => {
+      const skill = mock.listSkills({}).find((item) => item.id === id);
+      if (!skill) throw new Error(`Skill ${id} 不存在`);
+      return skill;
+    }),
+
+  createSkill: (a: { name: string; trigger: string; body: string; tags?: string[]; sourceTaskId?: string }) =>
+    call<Skill>("create_skill", a, () => {
+      throw new Error("浏览器预览不支持手工创建 Skill，请在桌面应用中操作。");
+    }),
+
+  updateSkill: (a: { id: string; name?: string; trigger?: string; body?: string; tags?: string[] }) =>
+    call<Skill>("update_skill", a, () => {
+      throw new Error("浏览器预览不支持编辑 Skill，请在桌面应用中操作。");
+    }),
 
   updateSkillStatus: (id: string, status: SkillStatus) =>
     call<Skill>("update_skill_status", { id, status }, () => mock.updateSkillStatus(id, status)),
@@ -170,13 +205,34 @@ export const ipc = {
   getAgentSnapshot: (sessionId: string) =>
     call<AgentSnapshot>("get_agent_snapshot", { sessionId }, () => mock.getAgentSnapshot(sessionId)),
   listTerminalChunks: (sessionId: string, afterSeq?: number) =>
-    call<TerminalChunk[]>("list_terminal_chunks", { sessionId, afterSeq }, () => []),
+    call<TerminalChunk[]>("list_terminal_chunks", { sessionId, afterSeq }, () => mock.getAgentSnapshot(sessionId).chunks),
   listWorkspaceLocks: () => call<WorkspaceLock[]>("list_workspace_locks", {}, () => mock.listWorkspaceLocks()),
+  releaseWorkspaceLocksForSession: (sessionId: string) =>
+    call<number>("release_workspace_locks_for_session", { sessionId }, () => 0),
+  getSessionTokenUsage: (sessionId: string) =>
+    call<SessionTokenUsage>("get_session_token_usage", { sessionId }, () => ({
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      source: "transcript_estimate",
+    })),
+  compressContext: (a: { sessionId?: string; text?: string; mode: "summary" | "budget" | "handover"; tokenBudget?: number }) =>
+    call<CompressResult>("compress_context", a, () => ({
+      compressed: a.text || "",
+      tokensBefore: Math.ceil((a.text || "").length / 4),
+      tokensAfter: Math.ceil((a.text || "").length / 4),
+    })),
   buildAgentStartupContext: (a: {
     taskId: string;
     agentKind?: string;
     profileId?: string;
     manualNote?: string;
+    eventLimit?: number;
+    skillLimit?: number;
+    includeGuard?: boolean;
+    includeSkills?: boolean;
+    includeHandover?: boolean;
+    tokenBudget?: number;
   }) => call<any>("build_agent_startup_context", a, () => mock.buildStartupContext(a)),
 
   // ── Agent 配置中心（CC Switch 互补层）───────────────
@@ -188,6 +244,8 @@ export const ipc = {
   listMcpServers: () => call<McpServerConfig[]>("list_mcp_servers", {}, () => mock.listMcpServers()),
   saveMcpServer: (server: McpServerConfig) =>
     call<void>("save_mcp_server", { server }, () => mock.saveMcpServer(server)),
+  recordSkillUsage: (skillId: string, taskId: string, outcome: "helped" | "neutral" | "harmful") =>
+    call<void>("record_skill_usage", { skillId, taskId, outcome }, () => undefined),
   listAgentConfigTargets: (cwd?: string) =>
     call<AgentConfigTarget[]>("list_agent_config_targets", { cwd }, () => mock.listAgentConfigTargets(cwd)),
   readAgentConfigTarget: (targetId: string, cwd?: string) =>
@@ -206,6 +264,12 @@ export const ipc = {
   backupNow: () => call<{ path: string }>("backup_now", {}, () => ({ path: "~/.ael/backups/ael-now.db" })),
   exportHandover: (taskId: string, include?: { events?: boolean; skills?: boolean; failures?: boolean; openQuestions?: string[] }) =>
     call<{ path: string }>("export_handover", { taskId, include }, () => ({ path: `~/.ael/handovers/${taskId}.zip` })),
+  importHandover: (path: string) =>
+    call<{ taskId: string }>("import_handover", { path }, () => {
+      throw new Error("浏览器预览不支持导入交接包，请在桌面应用中操作。");
+    }),
+  generateHandoverPrompt: (taskId: string) =>
+    call<{ prompt: string }>("generate_handover_prompt", { taskId }, () => ({ prompt: "" })),
 };
 
 export type Ipc = typeof ipc;

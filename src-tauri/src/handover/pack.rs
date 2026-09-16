@@ -11,7 +11,7 @@ use crate::models::{HandoverInclude, Settings};
 use crate::state::AppState;
 use crate::util::now_iso;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use zip::write::FileOptions;
 
 const RELATED_LIMIT: i64 = 8;
@@ -22,9 +22,11 @@ pub fn export_handover(
     include: Option<HandoverInclude>,
 ) -> AelResult<PathBuf> {
     let settings = state.settings_snapshot();
-    let manifest = build_manifest(state, task_id, include.unwrap_or_default(), &settings)?;
+    let mut manifest = build_manifest(state, task_id, include.unwrap_or_default(), &settings)?;
     // 出口①的一页证据随包携带(AHP)。
     let brief_md = brief::compile(&state.db, task_id).map(|b| b.markdown).ok();
+    manifest.brief_path = brief_md.as_ref().map(|_| "brief.md".to_string());
+    let evidence_files = collect_evidence_files(&mut manifest);
 
     let dest = state.db.paths.handovers.join(format!("{task_id}.zip"));
     let file = std::fs::File::create(&dest)?;
@@ -44,11 +46,40 @@ pub fn export_handover(
         zip.write_all(md.as_bytes())?;
     }
 
-    // evidence/ 目录占位(实际证据文件拷贝留待按 evidence_ref 实现)。
     zip.add_directory("evidence/", opts)?;
+    for (archive_path, bytes) in evidence_files {
+        zip.start_file(archive_path, opts)?;
+        zip.write_all(&bytes)?;
+    }
 
     zip.finish()?;
     Ok(dest)
+}
+
+/// 将事件 evidence_ref 指向的本地文件复制进包，并把引用改写为包内相对路径。
+/// 不读取目录、不跟随通配符；不存在或不可读的引用保留原值，避免静默伪造证据。
+fn collect_evidence_files(manifest: &mut Manifest) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    for (index, event) in manifest.events.iter_mut().enumerate() {
+        let Some(reference) = event.evidence_ref.clone() else {
+            continue;
+        };
+        let path = Path::new(&reference);
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let safe_name = file_name.replace(['\\', '/'], "_");
+        let archive_path = format!("evidence/{index:04}-{safe_name}");
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        event.evidence_ref = Some(archive_path.clone());
+        files.push((archive_path, bytes));
+    }
+    files
 }
 
 pub fn build_manifest(
