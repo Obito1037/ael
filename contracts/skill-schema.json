@@ -1,0 +1,43 @@
+{
+  "$comment": "一条 Skill 的结构 · FROZEN v1。JSON/IPC 字段 trigger 对应 SQL 列 trigger_text。",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AEL Skill",
+  "type": "object",
+  "required": ["id", "name", "trigger", "body", "status"],
+  "properties": {
+    "id": { "type": "string", "description": "uuid v4" },
+    "name": { "type": "string", "description": "简短可检索的名字" },
+    "trigger": {
+      "type": "string",
+      "description": "何时适用——相似任务的可比对特征(检索时与新任务 goal+tags 比对)。SQL 列名 trigger_text。"
+    },
+    "body": {
+      "type": "string",
+      "description": "markdown:可复用步骤 / 必须遵守的约束 / 如何验证做对了"
+    },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "source_task_id": { "type": ["string", "null"] },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "active", "deprecated"],
+      "description": "draft=待人工确认 / active=可被检索注入 / deprecated=已证明无效"
+    },
+    "version": { "type": "integer", "default": 1 },
+    "success_count": { "type": "integer", "default": 0 },
+    "fail_count": { "type": "integer", "default": 0 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  },
+
+  "$example": {
+    "id": "9f1c2a7e-...",
+    "name": "Tauri 2 Windows 构建缺少 C++ Build Tools",
+    "trigger": "Windows 首次 tauri build/dev,报 link.exe not found 或 MSVC 链接错误",
+    "body": "## 约束\n- 构建前确认装了 VS Build Tools(勾选 Desktop development with C++)\n\n## 步骤\n1. 装 VS Build Tools\n2. 重开终端让 PATH 生效\n3. cargo clean 后重试\n\n## 验证\n- tauri build 产出 .msi 即成功",
+    "tags": ["tauri", "windows", "build"],
+    "status": "active",
+    "version": 1,
+    "success_count": 3,
+    "fail_count": 0
+  }
+}

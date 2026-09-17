@@ -1,0 +1,118 @@
+# AEL · 运行时海关默认策略(policy.toml)
+# 首次启动时被物化到 ~/.ael/policy.toml,用户可自由改;删除后重启即恢复默认。
+#
+# 每条规则:
+#   id       规则名(进 policy_decisions.rule_id)
+#   action   allow | warn | hold | deny
+#            warn = 放行但留痕 + 前端提示
+#            hold = 扣在裁决线上,等人工「放行/拦截」;超时默认拦截
+#            deny = 直接拦截,不进 PTY
+#   patterns Rust regex(不支持 lookaround);任一命中即触发。
+# 多条规则同时命中时取最严处置(deny > hold > warn > allow),全部命中都会留痕。
+# 哲学:宁可漏报,不可误杀 —— 阈值可调,规则可关。
+
+schema_version = 1
+
+[gate]
+# PTY 输入逐行裁决(裁决必须发生在模型之外 —— 规则会被模型遗忘,不会被网关遗忘)
+apply_to_input = true
+# 输出流实时扫描:失败签名命中(事中约束注入)+ 危险回显预警
+scan_output = true
+# hold 扣留超时(秒),超时未处理默认拦截;0 = 永不超时
+hold_timeout_secs = 120
+
+[budget]
+# Token 预算熔断:会话累计估算超限后,后续输入一律 hold(rule_id = "budget")
+enabled = true
+max_session_tokens = 500000
+warn_ratio = 0.8
+
+[redaction]
+# transcript 落库前自动脱敏(API key / token / 私钥块 / URL 内嵌密码)
+enabled = true
+
+[[rules]]
+id = "destructive_fs"
+action = "hold"
+title = "破坏性文件删除"
+patterns = [
+  '(?i)\brm\s+(-\w+\s+)*-\w*(rf|fr)\w*\b',
+  '(?i)\brm\s+(-\w+\s+)*-r\b[^|;&]*\s-f\b',
+  '(?i)\brm\s+(-\w+\s+)*-f\b[^|;&]*\s-r\b',
+  '(?i)\brm\s+(-\w+\s+)*--recursive\b[^|;&]*--force\b',
+  '(?i)\brm\s+(-\w+\s+)*--force\b[^|;&]*--recursive\b',
+  '(?i)\b(rmdir|rd)\b[^|;&]*/s\b',
+  '(?i)\bdel\b[^|;&]*/[fsq]\b[^|;&]*/[fsq]\b',
+  '(?i)\bRemove-Item\b[^|;&]*-Recurse\b[^|;&]*-Force\b',
+  '(?i)\bRemove-Item\b[^|;&]*-Force\b[^|;&]*-Recurse\b',
+  '(?i)\bformat(\.com)?\s+[a-z]:',
+  '(?i)\bmkfs(\.\w+)?\b',
+  '(?i)\bdd\b[^|;&]*\bof=/dev/(sd|nvme|hd|disk)',
+  '(?i)\bgit\s+clean\b[^|;&]*-\w*[fd]\w*[fd]\w*',
+]
+
+[[rules]]
+id = "secret_egress"
+action = "hold"
+title = "密钥出站"
+patterns = [
+  '(?i)\b(curl|wget|http|https|Invoke-WebRequest|Invoke-RestMethod)\b[^|;&]*(\.env\b|id_rsa|id_ed25519|\.pem\b|\.p12\b|\.key\b|secrets?\.\w+|credentials)',
+  '(?i)\b(cat|type|Get-Content|gc)\b[^|;&]*(\.env\b|id_rsa|id_ed25519|\.pem\b|\.key\b)[^|;&]*\|[^|;&]*\b(curl|wget|nc|ncat|ssh)\b',
+  '(?i)\b(printenv|env)\b\s*\|[^|;&]*\b(curl|wget|nc|ncat)\b',
+  '(?i)\b(nc|ncat)\b[^|;&]*\s\d{2,5}\s*<\s*\S',
+  '(?i)\bscp\b[^|;&]*(\.env\b|id_rsa|\.pem\b)[^|;&]*\s\w+@',
+]
+
+[[rules]]
+id = "destructive_db"
+action = "hold"
+title = "高危 SQL"
+patterns = [
+  '(?i)\bdrop\s+(table|database|schema|index)\b',
+  '(?i)\btruncate\s+(table\s+)?\w+',
+  # 只匹配「表名后直接结束」的 DELETE(即无 WHERE 子句);regex 无 lookaround,宁可漏报
+  '(?i)\bdelete\s+from\s+[\w."\[\]]+\s*(;|$|")',
+]
+
+[[rules]]
+id = "destructive_git"
+action = "hold"
+title = "危险 Git 操作(保护主干)"
+patterns = [
+  '(?i)\bgit\s+push\b[^|;&]*(--force\b|-f\b)[^|;&]*\b(main|master|release)\b',
+  '(?i)\bgit\s+push\b[^|;&]*\b(main|master|release)\b[^|;&]*(--force\b|-f\b)',
+]
+
+[[rules]]
+id = "risky_git"
+action = "warn"
+title = "有损 Git 操作(留痕提示)"
+patterns = [
+  '(?i)\bgit\s+push\b[^|;&]*(--force\b|-f\b)',
+  '(?i)\bgit\s+reset\b[^|;&]*--hard\b',
+  '(?i)\bgit\s+branch\b[^|;&]*\s-D\b',
+  '(?i)\bgit\s+checkout\b\s+--\s+\.',
+]
+
+[[rules]]
+id = "system_danger"
+action = "hold"
+title = "系统级危险操作"
+patterns = [
+  '(?i)^\s*(sudo\s+)?(shutdown|reboot|halt|poweroff)\b',
+  '(?i)\bchmod\s+(-\w+\s+)*777\s+/',
+  '(?i)\breg\s+delete\b',
+  '(?i)\bSet-ExecutionPolicy\b[^|;&]*(Unrestricted|Bypass)',
+  '(?i):\(\)\s*\{\s*:\|:\s*&\s*\}\s*;', # fork bomb
+]
+
+[[rules]]
+id = "outbound_publish"
+action = "warn"
+title = "对外发布(不可逆的外部影响)"
+patterns = [
+  '(?i)\bnpm\s+publish\b',
+  '(?i)\bcargo\s+publish\b',
+  '(?i)\btwine\s+upload\b',
+  '(?i)\bgh\s+release\s+create\b',
+]
