@@ -14,6 +14,9 @@ import type {
 interface AppState {
   view: ViewId;
   setView: (v: ViewId) => void;
+  consoleTaskId: string | null;
+  consoleAgentLabel: string | null;
+  setConsoleContext: (taskId: string | null, agentLabel: string | null) => void;
 
   theme: string;
   setTheme: (id: string) => void;
@@ -57,8 +60,11 @@ const initialTheme = loadTheme();
 applyTheme(initialTheme);
 
 export const useStore = create<AppState>((set) => ({
-  view: "overview",
+  view: typeof window !== "undefined" && window.location.hash === "#demo" ? "demo" : "overview",
   setView: (view) => set({ view, focusTaskId: null, focusSessionId: null }),
+  consoleTaskId: null,
+  consoleAgentLabel: null,
+  setConsoleContext: (consoleTaskId, consoleAgentLabel) => set({ consoleTaskId, consoleAgentLabel }),
 
   theme: initialTheme,
   setTheme: (id) => {

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import * as mock from "./mock";
+import { demoDownloadMessage, downloadText, formatDemoAdrs, formatDemoBrief, formatDemoHandover } from "./browserExports";
 import type {
   AdrRecord,
   AgentConfigContent,
@@ -67,6 +68,25 @@ async function invokeWithTimeout<T>(cmd: string, args: Record<string, unknown>):
 async function call<T>(cmd: string, args: Record<string, unknown>, fallback: () => T | Promise<T>): Promise<T> {
   if (isTauri()) return invokeWithTimeout<T>(cmd, args);
   return fallback();
+}
+
+// History work can outlive a view. Keep one shared job and let a remounted view
+// reattach; a 30-second timeout must not invite a second still-running scan.
+let activeHistoryJob: { kind: "scan" | "extract" | "distill"; promise: Promise<unknown> } | null = null;
+let lastHistoryJobError: string | null = null;
+function runHistoryJob<T>(kind: "scan" | "extract" | "distill", cmd: string, args: Record<string, unknown>, fallback: () => T | Promise<T>): Promise<T> {
+  if (activeHistoryJob) return Promise.reject(new Error("历史扫描或提炼仍在后台运行，请等待完成。"));
+  lastHistoryJobError = null;
+  const promise = isTauri() ? invoke<T>(cmd, args) : Promise.resolve().then(fallback);
+  const job = { kind, promise };
+  activeHistoryJob = job;
+  const clear = () => { if (activeHistoryJob === job) activeHistoryJob = null; };
+  void promise.then(clear, (error: unknown) => {
+    lastHistoryJobError = error && typeof error === "object" && "message" in error && typeof error.message === "string"
+      ? error.message : "后台历史处理失败，已有索引仍保留。";
+    clear();
+  });
+  return promise;
 }
 
 export const ipc = {
@@ -161,14 +181,23 @@ export const ipc = {
   compileBrief: (taskId: string) =>
     call<ReviewBrief>("compile_brief", { taskId }, () => mock.compileBrief(taskId)),
   exportBrief: (taskId: string) =>
-    call<{ path: string }>("export_brief", { taskId }, () => ({ path: `~/.ael/briefs/${taskId}.md` })),
+    call<{ path: string }>("export_brief", { taskId }, () => {
+      const filename = downloadText(`ael-demo-brief-${taskId}.md`, formatDemoBrief(mock.compileBrief(taskId)), "text/markdown;charset=utf-8");
+      return { path: demoDownloadMessage(filename) };
+    }),
 
   // ── 出口④ 活文档 ADR ─────────────────────────────────
   listAdrs: (taskId?: string) => call<AdrRecord[]>("list_adrs", { taskId }, () => mock.listAdrs(taskId)),
   compileAdrs: (taskId: string) =>
     call<AdrRecord[]>("compile_adrs", { taskId }, () => mock.listAdrs(taskId)),
   exportAdrs: (taskId: string, repoPath?: string) =>
-    call<string[]>("export_adrs", { taskId, repoPath }, () => mock.listAdrs(taskId).map((a) => `adr/${a.number}.md`)),
+    call<string[]>("export_adrs", { taskId, repoPath }, () => {
+      const adrs = mock.listAdrs(taskId);
+      if (!adrs.length) return [];
+      // One bundled file avoids browsers blocking multiple downloads from one click.
+      const filename = downloadText(`ael-demo-decisions-${taskId}.md`, formatDemoAdrs(adrs), "text/markdown;charset=utf-8");
+      return adrs.map(adr => `${demoDownloadMessage(filename)} · ADR-${adr.number}`);
+    }),
 
   // ── 出口② Agent Blame ────────────────────────────────
   generateCommitTrailer: (taskId: string) =>
@@ -214,7 +243,7 @@ export const ipc = {
   getAgentSnapshot: (sessionId: string) =>
     call<AgentSnapshot>("get_agent_snapshot", { sessionId }, () => mock.getAgentSnapshot(sessionId)),
   listTerminalChunks: (sessionId: string, afterSeq?: number) =>
-    call<TerminalChunk[]>("list_terminal_chunks", { sessionId, afterSeq }, () => mock.getAgentSnapshot(sessionId).chunks),
+    call<TerminalChunk[]>("list_terminal_chunks", { sessionId, afterSeq }, () => mock.listTerminalChunks(sessionId, afterSeq)),
   listWorkspaceLocks: () => call<WorkspaceLock[]>("list_workspace_locks", {}, () => mock.listWorkspaceLocks()),
   releaseWorkspaceLocksForSession: (sessionId: string) =>
     call<number>("release_workspace_locks_for_session", { sessionId }, () => 0),
@@ -245,21 +274,32 @@ export const ipc = {
   }) => call<any>("build_agent_startup_context", a, () => mock.buildStartupContext(a)),
 
   // ── 本机历史索引 ─────────────────────────────────────
-  scanHistory: () => call<HistoryScanSummary>("scan_history", {}, () => mock.historyScanSummary()),
+  activeHistoryJob: () => activeHistoryJob,
+  lastHistoryJobError: () => lastHistoryJobError,
+  scanHistory: () => runHistoryJob<HistoryScanSummary>("scan", "scan_history", {}, () => mock.historyScanSummary()),
   getHistoryScanSummary: () =>
     call<HistoryScanSummary | null>("get_history_scan_summary", {}, () => mock.historyScanSummary()),
   listHistoryConversations: (a: { limit?: number; offset?: number } = {}) =>
     call<HistoryConversation[]>("list_history_conversations", a, () => mock.historyConversations()),
   getHistoryConversation: (id: string) =>
     call<HistoryConversation>("get_history_conversation", { id }, () => mock.historyConversations()[0]),
-  listHistoryMessages: (conversationId: string) =>
-    call<HistoryMessage[]>("list_history_messages", { conversationId }, () => mock.historyMessages(conversationId)),
+  listHistoryMessages: (conversationId: string, options: { limit?: number; offset?: number } = {}) => {
+    const limit = Math.max(1, Math.min(100, options.limit ?? 30));
+    const offset = Math.max(0, options.offset ?? 0);
+    return call<HistoryMessage[]>("list_history_messages", { conversationId, limit, offset }, () =>
+      mock.historyMessages(conversationId).slice(offset, offset + limit).map((message) => ({
+        ...message,
+        payloadJson: undefined,
+        text: Array.from(message.text).length > 4000 ? Array.from(message.text).slice(0, 4000).join("") + "\n…（预览已截断，完整内容保留在本机索引）" : message.text,
+      })),
+    );
+  },
 
   // ── 候选经验审阅 ─────────────────────────────────────
   extractHistoryCandidates: () =>
-    call<CandidateExtractionSummary>("extract_history_candidates", {}, () => mock.extractHistoryCandidates()),
+    runHistoryJob<CandidateExtractionSummary>("extract", "extract_history_candidates", {}, () => mock.extractHistoryCandidates()),
   distillHistoryCandidates: (a: { profileId?: "codex" | "claude_code"; cwd?: string; conversationId?: string } = {}) =>
-    call<CandidateExtractionSummary>("distill_history_candidates", a, () => mock.distillHistoryCandidates()),
+    runHistoryJob<CandidateExtractionSummary>("distill", "distill_history_candidates", a, () => mock.distillHistoryCandidates()),
   listSkillCandidates: (status?: CandidateStatus) =>
     call<SkillCandidate[]>("list_skill_candidates", { status, limit: 200 }, () => mock.skillCandidates()),
   listFailureCandidates: (status?: CandidateStatus) =>
@@ -301,9 +341,22 @@ export const ipc = {
   getSettings: () => call<Settings>("get_settings", {}, () => mock.SETTINGS),
   setSettings: (a: Partial<Settings>) =>
     call<Settings>("set_settings", a, () => mock.setSettings(a)),
-  backupNow: () => call<{ path: string }>("backup_now", {}, () => ({ path: "~/.ael/backups/ael-now.db" })),
+  backupNow: () => call<{ path: string }>("backup_now", {}, () => {
+    throw new Error("浏览器演示无法备份本地数据库，请在桌面应用中操作。");
+  }),
   exportHandover: (taskId: string, include?: { events?: boolean; skills?: boolean; failures?: boolean; openQuestions?: string[] }) =>
-    call<{ path: string }>("export_handover", { taskId, include }, () => ({ path: `~/.ael/handovers/${taskId}.zip` })),
+    call<{ path: string }>("export_handover", { taskId, include }, () => {
+      const task = mock.getTask(taskId);
+      const data = formatDemoHandover({
+        task,
+        events: include?.events === false ? undefined : mock.listEvents(taskId),
+        skills: include?.skills === false ? undefined : mock.listSkills({}).filter(skill => skill.sourceTaskId === taskId),
+        failures: include?.failures === false ? undefined : mock.checkFailureGuard(task.goal, task.tags).matchedFailures,
+        openQuestions: include?.openQuestions,
+      });
+      const filename = downloadText(`ael-demo-handover-${taskId}.json`, data, "application/json;charset=utf-8");
+      return { path: demoDownloadMessage(filename) };
+    }),
   importHandover: (path: string) =>
     call<{ taskId: string }>("import_handover", { path }, () => {
       throw new Error("浏览器预览不支持导入交接包，请在桌面应用中操作。");

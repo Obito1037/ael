@@ -131,6 +131,9 @@ export interface HistorySourceCount {
   sourceAgent: string;
   sessions: number;
   messages: number;
+  skippedFiles?: number;
+  skippedLines?: number;
+  warnings?: string[];
 }
 
 export interface HistoryScanSummary {
@@ -477,6 +480,9 @@ export interface TerminalChunk {
 export interface AgentSnapshot {
   session: AgentSession;
   chunks: TerminalChunk[];
+  truncated: boolean;
+  firstSeq: number | null;
+  lastSeq: number | null;
 }
 
 export interface WorkspaceLock {
@@ -530,16 +536,13 @@ export interface SignatureHitPayload {
 // 视图
 export type ViewId =
   | "overview"
+  | "demo"
   | "tasks"
   | "evidence"
   | "console"
-  | "agents"
   | "integrations"
   | "gate"
-  | "briefs"
-  | "blame"
   | "memory"
-  | "adr"
   | "settings";
 
 export type ToastKind = "info" | "success" | "warning" | "error";

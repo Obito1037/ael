@@ -1,4 +1,4 @@
-import { type ButtonHTMLAttributes, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { cx } from "./lib/format";
 
@@ -182,23 +182,110 @@ export function Field({ label, children, hint }: { label: string; children: Reac
 export const inputCls =
   "w-full rounded-xl border border-line bg-panel/84 px-3.5 py-2.5 text-[15px] leading-[1.6] text-ink shadow-[inset_0_1px_1px_rgb(var(--c-ink)_/_0.018)] placeholder:text-ink/28 focus:border-orange/42 focus:bg-panel";
 
+const modalStack: HTMLDivElement[] = [];
+let modalBodyOverflow = "";
+
+function modalFocusableElements(dialog: HTMLElement) {
+  return Array.from(dialog.querySelectorAll<HTMLElement>(
+    'a[href], button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]',
+  )).filter((element) => element.tabIndex >= 0 && !element.closest('[inert], [hidden], [aria-hidden="true"]') && element.getClientRects().length > 0);
+}
+
 export function Modal({
   title,
   onClose,
   children,
   wide = false,
+  returnFocusTo,
 }: {
   title: ReactNode;
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
+  returnFocusTo?: HTMLElement | null;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const titleId = useId();
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const previouslyFocused = returnFocusTo ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    if (modalStack.length === 0) {
+      modalBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+    }
+    modalStack.push(dialog);
+    let lastFocused: HTMLElement | null = null;
+    const isTopmost = () => modalStack[modalStack.length - 1] === dialog;
+    const focusInside = () => {
+      const focusable = modalFocusableElements(dialog);
+      const preferred = focusable.find((element) => element.hasAttribute("autofocus") || element.hasAttribute("data-autofocus"))
+        ?? focusable.find((element) => element.matches("input, textarea, select"))
+        ?? focusable[0];
+      (lastFocused?.isConnected && focusable.includes(lastFocused) ? lastFocused : preferred ?? dialog).focus({ preventScroll: true });
+    };
+    const handleFocus = (event: FocusEvent) => {
+      if (!isTopmost()) return;
+      if (event.target instanceof HTMLElement && dialog.contains(event.target)) lastFocused = event.target;
+      else focusInside();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!isTopmost() || event.isComposing || event.keyCode === 229) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onCloseRef.current();
+      } else if (event.key === "Tab") {
+        const focusable = modalFocusableElements(dialog);
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const active = document.activeElement;
+        if (!first) {
+          event.preventDefault();
+          dialog.focus({ preventScroll: true });
+        } else if (event.shiftKey && (active === first || !focusable.includes(active as HTMLElement))) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && (active === last || !focusable.includes(active as HTMLElement))) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown, true);
+    document.addEventListener("focusin", handleFocus);
+    focusInside();
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown, true);
+      document.removeEventListener("focusin", handleFocus);
+      const wasTopmost = isTopmost();
+      const stackIndex = modalStack.indexOf(dialog);
+      if (stackIndex !== -1) modalStack.splice(stackIndex, 1);
+      if (modalStack.length === 0) document.body.style.overflow = modalBodyOverflow;
+      if (!wasTopmost) return;
+      const remaining = modalStack[modalStack.length - 1];
+      if (previouslyFocused?.isConnected && (!remaining || remaining.contains(previouslyFocused))) {
+        previouslyFocused.focus({ preventScroll: true });
+      } else if (remaining) {
+        (modalFocusableElements(remaining)[0] ?? remaining).focus({ preventScroll: true });
+      }
+    };
+  }, []);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-ink/18 p-4 backdrop-blur-[7px]"
-      onClick={onClose}
+      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className={cx(
           "glass-surface max-h-[88vh] w-full overflow-hidden rounded-[24px] shadow-[var(--shadow-float)]",
           wide ? "max-w-5xl" : "max-w-xl",
@@ -206,7 +293,7 @@ export function Modal({
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-line/80 px-5 py-4">
-          <h2 className="font-serif text-[19px] font-normal text-ink">{title}</h2>
+          <h2 id={titleId} className="font-serif text-[19px] font-normal text-ink">{title}</h2>
           <button type="button" onClick={onClose} className="icon-button h-8 w-8" aria-label="关闭">
             <X className="h-3.5 w-3.5" strokeWidth={1.6} />
           </button>
