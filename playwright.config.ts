@@ -10,6 +10,8 @@ export default defineConfig({
   testDir: './tests',
   fullyParallel: true,
   workers: 1,
+  // First load compiles every lazy view on the Vite dev server; 5s is not enough on a cold start.
+  expect: { timeout: 20_000 },
   reporter: [['list'], ['html', { open: 'never' }]],
   webServer: {
     command: `npm run dev -- --host ${address.hostname} --port ${address.port || '80'}`,
