@@ -49,6 +49,81 @@ const CLAUDE_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.99.1";
 
 /// 等待 ACP 握手的上限。首次运行要下载适配器，超时后保留会话继续等待，不回退。
 const ACP_READY_TIMEOUT: Duration = Duration::from_secs(120);
+const CODEX_GOVERNED_MODE: &str = "read-only";
+const CODEX_REASONING_EFFORT: &str = "medium";
+const ACP_PERMISSION_RULE: &str = "acp.permission";
+
+/// 权限请求里真正要执行的内容，用于海关规则匹配和界面展示。
+fn permission_subject(tool_call: &Value) -> String {
+    let command = tool_call.pointer("/rawInput/command");
+    if let Some(text) = command.and_then(Value::as_str) {
+        return text.to_string();
+    }
+    if let Some(parts) = command.and_then(Value::as_array) {
+        return parts
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    let title = tool_call
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("工具调用");
+    let paths = permission_paths(tool_call);
+    if paths.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title}: {}", paths.join(", "))
+    }
+}
+
+fn permission_paths(tool_call: &Value) -> Vec<&str> {
+    tool_call
+        .get("locations")
+        .and_then(Value::as_array)
+        .map(|locations| {
+            locations
+                .iter()
+                .filter_map(|location| location.get("path").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn touches_outside_workspace(tool_call: &Value, cwd: &str) -> bool {
+    let root = PathBuf::from(cwd);
+    permission_paths(tool_call)
+        .iter()
+        .any(|path| !PathBuf::from(path).starts_with(&root))
+}
+
+#[derive(Debug, PartialEq)]
+enum PermissionRoute {
+    Allow,
+    Reject,
+    AskHuman,
+}
+
+/// 和 PTY 海关同一套语义：未命中放行，warn 放行留痕，hold 等人工，deny 直接拒绝。
+/// 工作区之外的写入规则看不出来，一律交给人。
+fn route_permission(action: PolicyAction, outside_workspace: bool) -> PermissionRoute {
+    match action {
+        PolicyAction::Deny => PermissionRoute::Reject,
+        PolicyAction::Hold => PermissionRoute::AskHuman,
+        PolicyAction::Allow | PolicyAction::Warn if outside_workspace => PermissionRoute::AskHuman,
+        PolicyAction::Allow | PolicyAction::Warn => PermissionRoute::Allow,
+    }
+}
+
+fn allow_option(options: &[PermissionOptionView]) -> Option<String> {
+    options
+        .iter()
+        .find(|option| option.kind == "allow_once")
+        .or_else(|| options.iter().find(|option| option.kind == "allow_always"))
+        .or_else(|| options.first())
+        .map(|option| option.option_id.clone())
+}
 
 fn acp_args(profile_id: &str) -> Vec<&'static str> {
     match profile_id {
@@ -79,22 +154,56 @@ fn command_line_for(profile_id: &str) -> String {
 
 /// 启动参数。Codex 优先用本机已登录的 CLI，而不是适配器自带的平台包，
 /// 后者依赖 npm 可选依赖，在 npx 缓存里可能缺失。
-fn spawn_args(profile_id: &str, local_codex: Option<PathBuf>) -> Vec<String> {
+///
+/// 适配器默认的 auto-review 模式由模型自行批准命令，AEL 收不到任何请求，
+/// 海关形同虚设。read-only 模式下所有写操作都必须申请权限，从而经过海关。
+fn spawn_args(
+    profile_id: &str,
+    local_codex: Option<PathBuf>,
+    model: Option<&str>,
+    inherited_config: Option<&str>,
+) -> Vec<String> {
     let mut args = Vec::new();
     if profile_id == "codex" {
         if let Some(path) = local_codex {
             args.push(format!("CODEX_PATH={}", path.display()));
+        }
+        args.push(format!("INITIAL_AGENT_MODE={CODEX_GOVERNED_MODE}"));
+        if let Some(config) = codex_config(model, inherited_config) {
+            args.push(format!("CODEX_CONFIG={config}"));
         }
     }
     args.extend(acp_args(profile_id).into_iter().map(str::to_owned));
     args
 }
 
-fn agent_for(profile_id: &str) -> Result<AcpAgent, agent_client_protocol::Error> {
+/// 选了模型就同时固定推理强度，否则会沿用全局配置里可能很贵的档位。
+fn codex_config(model: Option<&str>, inherited: Option<&str>) -> Option<String> {
+    let mut config = inherited
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .filter(Value::is_object);
+    if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+        let object = config.get_or_insert_with(|| Value::Object(Default::default()));
+        object["model"] = Value::String(model.to_string());
+        object["model_reasoning_effort"] = Value::String(CODEX_REASONING_EFFORT.to_string());
+    }
+    config.map(|value| value.to_string())
+}
+
+fn agent_for(
+    profile_id: &str,
+    model: Option<&str>,
+) -> Result<AcpAgent, agent_client_protocol::Error> {
     let local_codex = (profile_id == "codex")
         .then(|| crate::agent::resolve_executable("codex"))
         .flatten();
-    AcpAgent::from_args(spawn_args(profile_id, local_codex))
+    let inherited = std::env::var("CODEX_CONFIG").ok();
+    AcpAgent::from_args(spawn_args(
+        profile_id,
+        local_codex,
+        model,
+        inherited.as_deref(),
+    ))
         .map_err(|error| agent_client_protocol::util::internal_error(error.to_string()))
 }
 
@@ -129,6 +238,7 @@ enum AcpCommand {
 }
 
 struct PendingAcpPermission {
+    rule_id: String,
     session_id: String,
     task_id: String,
     command_text: String,
@@ -231,15 +341,98 @@ impl AcpRuntime {
                     .unwrap_or_else(|| format!("{:?}", option.kind)),
             })
             .collect::<Vec<_>>();
-        let command_text = serde_json::to_string(&request.tool_call)
-            .unwrap_or_else(|_| "ACP 工具调用".to_string());
+        let tool_call = serde_json::to_value(&request.tool_call).unwrap_or(Value::Null);
+        let subject = permission_subject(&tool_call);
+        let Some(state) = app.try_state::<crate::state::AppState>() else {
+            return RequestPermissionOutcome::Cancelled;
+        };
+        let verdict = state.gate.evaluate(&subject);
+        let outside = state
+            .db
+            .get_agent_session(session_id)
+            .map(|session| touches_outside_workspace(&tool_call, &session.cwd))
+            .unwrap_or(true);
+        let rule_id = verdict
+            .rule_id
+            .clone()
+            .unwrap_or_else(|| ACP_PERMISSION_RULE.to_string());
+        let command_text = format!("ACP 权限请求: {subject}");
+        match route_permission(verdict.action, outside) {
+            PermissionRoute::Allow => {
+                let Some(option_id) = allow_option(&options) else {
+                    return RequestPermissionOutcome::Cancelled;
+                };
+                record_policy_decision(
+                    app,
+                    &state.db,
+                    NewPolicyDecision {
+                        session_id: Some(session_id.to_string()),
+                        task_id: Some(task_id.to_string()),
+                        rule_id,
+                        action: verdict.action,
+                        verdict: if verdict.action == PolicyAction::Warn {
+                            PolicyVerdictKind::Warned
+                        } else {
+                            PolicyVerdictKind::Passed
+                        },
+                        command_text,
+                        reason: verdict.reason,
+                        decided_by: DecidedBy::Policy,
+                        resolved_at: Some(now_iso()),
+                    },
+                );
+                emit_acp_output(
+                    app,
+                    session_id,
+                    format!("\r\n[AEL·海关] 放行并留痕: {subject}\r\n"),
+                );
+                return RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                    option_id,
+                ));
+            }
+            PermissionRoute::Reject => {
+                record_policy_decision(
+                    app,
+                    &state.db,
+                    NewPolicyDecision {
+                        session_id: Some(session_id.to_string()),
+                        task_id: Some(task_id.to_string()),
+                        rule_id: rule_id.clone(),
+                        action: verdict.action,
+                        verdict: PolicyVerdictKind::AutoDenied,
+                        command_text,
+                        reason: verdict.reason,
+                        decided_by: DecidedBy::Policy,
+                        resolved_at: Some(now_iso()),
+                    },
+                );
+                emit_acp_output(
+                    app,
+                    session_id,
+                    format!("\r\n[AEL·海关] 已拦截(规则 {rule_id}): {subject}\r\n"),
+                );
+                return RequestPermissionOutcome::Cancelled;
+            }
+            PermissionRoute::AskHuman => {}
+        }
+        emit_acp_output(
+            app,
+            session_id,
+            format!("\r\n[AEL·海关] 等待人工裁决(规则 {rule_id}): {subject}\r\n"),
+        );
+        let reason = if verdict.matched {
+            verdict.reason
+        } else {
+            "写入范围超出工作区，等待人工裁决".to_string()
+        };
         let id = Uuid::new_v4().to_string();
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let pending = PendingAcpPermission {
+            rule_id,
             session_id: session_id.to_string(),
             task_id: task_id.to_string(),
-            command_text: format!("ACP 权限请求: {command_text}"),
-            reason: "ACP 原生权限请求，等待人工裁决".to_string(),
+            command_text,
+            reason,
             created_at: now_iso(),
             options,
             response_tx,
@@ -249,7 +442,7 @@ impl AcpRuntime {
             session_id: pending.session_id.clone(),
             task_id: pending.task_id.clone(),
             command_text: pending.command_text.clone(),
-            rule_id: "acp.permission".to_string(),
+            rule_id: pending.rule_id.clone(),
             reason: pending.reason.clone(),
             created_at: pending.created_at.clone(),
             timeout_secs: 0,
@@ -279,7 +472,7 @@ impl AcpRuntime {
                 session_id: pending.session_id.clone(),
                 task_id: pending.task_id.clone(),
                 command_text: pending.command_text.clone(),
-                rule_id: "acp.permission".to_string(),
+                rule_id: pending.rule_id.clone(),
                 reason: pending.reason.clone(),
                 created_at: pending.created_at.clone(),
                 timeout_secs: 0,
@@ -322,7 +515,7 @@ impl AcpRuntime {
         let decision = db.insert_policy_decision(NewPolicyDecision {
             session_id: Some(pending.session_id),
             task_id: Some(pending.task_id),
-            rule_id: "acp.permission".to_string(),
+            rule_id: pending.rule_id,
             action: PolicyAction::Hold,
             verdict: if approve {
                 PolicyVerdictKind::Approved
@@ -583,7 +776,12 @@ impl AcpRuntime {
 ///
 /// 这条路径只用于候选生成，不写 active 记忆；调用方必须继续做 JSON 校验、
 /// 来源校验和人工审核。AEL 不直接调用模型供应商 API，也不接触 API Key。
-pub fn run_json_prompt(profile_id: &str, cwd: PathBuf, prompt: String) -> AelResult<String> {
+pub fn run_json_prompt(
+    profile_id: &str,
+    cwd: PathBuf,
+    prompt: String,
+    model: Option<&str>,
+) -> AelResult<String> {
     if !AcpRuntime::supports(profile_id) {
         return Err(AelError::invalid_input(format!(
             "profile {profile_id} 暂不支持 ACP JSON 提炼"
@@ -605,7 +803,7 @@ pub fn run_json_prompt(profile_id: &str, cwd: PathBuf, prompt: String) -> AelRes
         .build()
         .map_err(|error| AelError::internal(format!("创建 ACP JSON 运行时失败: {error}")))?;
     runtime
-        .block_on(run_json_prompt_async(profile_id, cwd, prompt))
+        .block_on(run_json_prompt_async(profile_id, cwd, prompt, model))
         .map_err(|error| AelError::internal(format!("ACP JSON 提炼失败: {error}")))
 }
 
@@ -613,8 +811,9 @@ async fn run_json_prompt_async(
     profile_id: &str,
     cwd: PathBuf,
     prompt: String,
+    model: Option<&str>,
 ) -> Result<String, agent_client_protocol::Error> {
-    let agent = agent_for(profile_id)?;
+    let agent = agent_for(profile_id, model)?;
     Client
         .builder()
         .name("ael3")
@@ -685,7 +884,10 @@ async fn run_connection(
     stop_requested: Arc<AtomicBool>,
     ready: ReadySender,
 ) -> Result<AcpEnd, agent_client_protocol::Error> {
-    let agent = agent_for(&profile_id)?;
+    let model = app
+        .try_state::<crate::state::AppState>()
+        .map(|state| state.settings_snapshot().codex_model);
+    let agent = agent_for(&profile_id, model.as_deref())?;
     let permission_app = app.clone();
     let permission_session_id = session_id.clone();
     let permission_task_id = task_id.clone();
@@ -907,6 +1109,12 @@ fn persist_and_emit(app: &AppHandle, db: &Db, chunk: TerminalChunk) {
     );
 }
 
+fn record_policy_decision(app: &AppHandle, db: &Db, input: NewPolicyDecision) {
+    if let Ok(decision) = db.insert_policy_decision(input) {
+        let _ = app.emit(GATE_DECISION_EVENT, &decision);
+    }
+}
+
 fn mark_running(app: &AppHandle, session_id: &str) {
     let Some(state) = app.try_state::<crate::state::AppState>() else {
         return;
@@ -928,10 +1136,9 @@ fn readable_error(detail: &str) -> String {
         .find('{')
         .and_then(|start| serde_json::from_str::<Value>(&detail[start..]).ok())
         .and_then(|value| {
-            value
-                .pointer("/data/message")
-                .or_else(|| value.get("message"))
-                .and_then(Value::as_str)
+            ["/data/message", "/data/details", "/data", "/message"]
+                .iter()
+                .find_map(|path| value.pointer(path).and_then(Value::as_str))
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| detail.to_string())
@@ -994,10 +1201,104 @@ mod tests {
     use super::*;
 
     #[test]
+    fn codex_sessions_never_start_in_the_self_approving_mode() {
+        let args = spawn_args("codex", None, None, None);
+        assert!(args.contains(&"INITIAL_AGENT_MODE=read-only".to_string()));
+    }
+
+    #[test]
+    fn selected_model_overrides_inherited_config_and_fixes_effort() {
+        let args = spawn_args(
+            "codex",
+            None,
+            Some("gpt-5.6-luna"),
+            Some(r#"{"model":"other","foo":1}"#),
+        );
+        let config = args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("CODEX_CONFIG="))
+            .expect("config passed");
+        let config: Value = serde_json::from_str(config).unwrap();
+        assert_eq!(config["model"], "gpt-5.6-luna");
+        assert_eq!(config["model_reasoning_effort"], "medium");
+        assert_eq!(config["foo"], 1);
+    }
+
+    #[test]
+    fn empty_model_follows_the_agent_config() {
+        assert_eq!(codex_config(Some("  "), None), None);
+    }
+
+    #[test]
+    fn gate_rules_see_the_raw_command_not_escaped_json() {
+        let tool_call = serde_json::json!({
+            "title": "Run command",
+            "rawInput": { "command": "powershell -Command \"Remove-Item -Recurse -Force victim\"" }
+        });
+        let subject = permission_subject(&tool_call);
+        assert!(subject.contains("Remove-Item -Recurse -Force victim"));
+        assert!(!subject.contains('{'));
+    }
+
+    #[test]
+    fn edits_are_described_by_their_paths() {
+        let tool_call = serde_json::json!({
+            "title": "Edit files",
+            "locations": [{ "path": "D:/repo/a.txt" }]
+        });
+        assert_eq!(permission_subject(&tool_call), "Edit files: D:/repo/a.txt");
+    }
+
+    #[test]
+    fn writes_outside_the_workspace_are_detected() {
+        let inside = serde_json::json!({ "locations": [{ "path": "D:/repo/src/a.txt" }] });
+        let outside = serde_json::json!({ "locations": [{ "path": "D:/other/a.txt" }] });
+        assert!(!touches_outside_workspace(&inside, "D:/repo"));
+        assert!(touches_outside_workspace(&outside, "D:/repo"));
+    }
+
+    #[test]
+    fn routing_follows_the_policy_action() {
+        use PermissionRoute::*;
+        assert_eq!(route_permission(PolicyAction::Allow, false), Allow);
+        assert_eq!(route_permission(PolicyAction::Warn, false), Allow);
+        assert_eq!(route_permission(PolicyAction::Hold, false), AskHuman);
+        assert_eq!(route_permission(PolicyAction::Deny, false), Reject);
+    }
+
+    #[test]
+    fn writes_outside_the_workspace_always_ask_a_human() {
+        assert_eq!(
+            route_permission(PolicyAction::Allow, true),
+            PermissionRoute::AskHuman
+        );
+        assert_eq!(
+            route_permission(PolicyAction::Deny, true),
+            PermissionRoute::Reject
+        );
+    }
+
+    #[test]
+    fn automatic_approval_prefers_a_single_use_grant() {
+        let option = |id: &str, kind: &str| PermissionOptionView {
+            option_id: id.to_string(),
+            name: id.to_string(),
+            kind: kind.to_string(),
+        };
+        let options = [option("always", "allow_always"), option("once", "allow_once")];
+        assert_eq!(allow_option(&options).as_deref(), Some("once"));
+    }
+
+    #[test]
     fn readable_error_extracts_the_message_and_hides_local_paths() {
         let detail = r#"Internal error: {"spawned_at":"C:\\Users\\x\\session.rs:1","data":{"message":"usage limit"}}"#;
         assert_eq!(readable_error(detail), "usage limit");
         assert_eq!(readable_error("process exited"), "process exited");
+        assert_eq!(
+            readable_error(r#"Internal error: {"data":{"details":"bad config"}}"#),
+            "bad config"
+        );
+        assert_eq!(readable_error(r#"Internal error: {"data":"exit 1"}"#), "exit 1");
     }
 
     #[test]
@@ -1010,20 +1311,25 @@ mod tests {
 
     #[test]
     fn codex_uses_the_local_cli_when_one_is_found() {
-        let args = spawn_args("codex", Some(PathBuf::from("C:/Program Files/codex.exe")));
+        let args = spawn_args(
+            "codex",
+            Some(PathBuf::from("C:/Program Files/codex.exe")),
+            None,
+            None,
+        );
         assert_eq!(args[0], "CODEX_PATH=C:/Program Files/codex.exe");
         assert!(AcpAgent::from_args(args).is_ok());
     }
 
     #[test]
     fn other_agents_ignore_the_local_codex_path() {
-        let args = spawn_args("gemini", Some(PathBuf::from("codex.exe")));
-        assert!(!args[0].starts_with("CODEX_PATH="));
+        let args = spawn_args("gemini", Some(PathBuf::from("codex.exe")), Some("m"), None);
+        assert!(args[0].starts_with("gemini"));
     }
 
     #[test]
     fn codex_without_a_local_cli_uses_the_adapter_dependency() {
-        let args = spawn_args("codex", None);
-        assert!(args[0].starts_with("npx"));
+        let args = spawn_args("codex", None, None, None);
+        assert!(args.iter().any(|arg| arg.starts_with("npx")));
     }
 }
