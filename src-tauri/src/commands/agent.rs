@@ -18,7 +18,7 @@ use crate::agent::{
 };
 use crate::error::{AelError, AelResult};
 use crate::state::AppState;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
 pub fn detect_agents(state: State<AppState>) -> AelResult<Vec<AgentProfile>> {
@@ -195,17 +195,29 @@ pub fn list_agent_sessions(
 }
 
 #[tauri::command]
-pub fn get_agent_snapshot(state: State<AppState>, session_id: String) -> AelResult<AgentSnapshot> {
-    state.agents.snapshot(&state.db, &session_id)
+pub async fn get_agent_snapshot(app: AppHandle, session_id: String) -> AelResult<AgentSnapshot> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let reader = state.db.terminal_reader()?;
+        state.agents.snapshot(&reader, &session_id)
+    })
+    .await
+    .map_err(|_| AelError::internal("会话回放读取线程异常结束。"))?
 }
 
 #[tauri::command]
-pub fn list_terminal_chunks(
-    state: State<AppState>,
+pub async fn list_terminal_chunks(
+    app: AppHandle,
     session_id: String,
     after_seq: Option<u64>,
 ) -> AelResult<Vec<TerminalChunk>> {
-    state.agents.list_chunks(&state.db, &session_id, after_seq)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let reader = state.db.terminal_reader()?;
+        state.agents.list_chunks(&reader, &session_id, after_seq)
+    })
+    .await
+    .map_err(|_| AelError::internal("会话片段读取线程异常结束。"))?
 }
 
 #[tauri::command]

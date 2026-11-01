@@ -3,7 +3,7 @@
 use super::{tags_from_json, tags_to_json, Db};
 use crate::agent::{
     AgentProfile, AgentSession, AgentSessionStatus, TerminalChunk, TerminalDirection,
-    WorkspaceLock, WorkspaceLockKind,
+    WorkspaceLock, WorkspaceLockKind, TERMINAL_PREVIEW_MAX_BYTES, TERMINAL_PREVIEW_MAX_CHUNKS,
 };
 use crate::error::{AelError, AelResult};
 use crate::util::new_id;
@@ -271,6 +271,100 @@ impl Db {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// A separate read-only WAL connection avoids waiting on the UI DB mutex.
+    pub fn terminal_reader(&self) -> AelResult<Self> {
+        let conn = rusqlite::Connection::open_with_flags(
+            &self.paths.db_file,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+            paths: self.paths.clone(),
+        })
+    }
+
+    /// Bounded IPC projection. Database evidence is neither truncated nor deleted.
+    /// `newest` returns the latest tail in ascending order; otherwise callers can
+    /// advance after_seq to the last returned seq to fetch the next bounded page.
+    pub fn terminal_chunk_page(
+        &self,
+        session_id: &str,
+        after_seq: Option<u64>,
+        newest: bool,
+    ) -> AelResult<(Vec<TerminalChunk>, bool)> {
+        let conn = self.lock();
+        let order = if newest { "DESC" } else { "ASC" };
+        let start = if newest {
+            -(TERMINAL_PREVIEW_MAX_BYTES as i64)
+        } else {
+            1
+        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT session_id,seq,direction,substr(CAST(text AS BLOB),?3,?4),created_at,length(CAST(text AS BLOB))
+             FROM terminal_chunks WHERE session_id=?1 AND seq>?2 ORDER BY seq {order} LIMIT ?5"
+        ))?;
+        let rows = stmt.query_map(
+            params![
+                session_id,
+                after_seq.unwrap_or(0).min(i64::MAX as u64) as i64,
+                start,
+                TERMINAL_PREVIEW_MAX_BYTES as i64,
+                TERMINAL_PREVIEW_MAX_CHUNKS as i64 + 1
+            ],
+            |row| {
+                let direction: String = row.get(2)?;
+                let bytes: Vec<u8> = row.get(3)?;
+                let original_bytes: i64 = row.get(5)?;
+                let partial = original_bytes > bytes.len() as i64;
+                let chunk = TerminalChunk {
+                    session_id: row.get(0)?,
+                    seq: row.get::<_, i64>(1)? as u64,
+                    direction: TerminalDirection::from_db(&direction).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    text: String::from_utf8_lossy(&bytes).into_owned(),
+                    created_at: row.get(4)?,
+                };
+                Ok((chunk, partial))
+            },
+        )?;
+        let mut chunks = Vec::new();
+        let mut used_bytes = 0usize;
+        let mut truncated = false;
+        for row in rows {
+            if chunks.len() >= TERMINAL_PREVIEW_MAX_CHUNKS
+                || used_bytes >= TERMINAL_PREVIEW_MAX_BYTES
+            {
+                truncated = true;
+                break;
+            }
+            let (mut chunk, partial) = row?;
+            let remaining = TERMINAL_PREVIEW_MAX_BYTES - used_bytes;
+            let (text, clipped) =
+                crate::agent::terminal_preview_text(&chunk.text, remaining, newest, partial);
+            if text.is_empty() && (!chunk.text.is_empty() || partial) {
+                truncated = true;
+                break;
+            }
+            chunk.text = text;
+            used_bytes += chunk.text.len();
+            chunks.push(chunk);
+            if clipped {
+                truncated = true;
+                break;
+            }
+        }
+        if newest {
+            chunks.reverse();
+        }
+        Ok((chunks, truncated))
     }
 
     pub fn mark_stale_agent_sessions(&self) -> AelResult<()> {

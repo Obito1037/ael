@@ -44,6 +44,111 @@ fn make_session_with(id: &str, task_id: &str, cwd: &str) -> AgentSession {
 }
 
 #[test]
+fn terminal_snapshot_and_after_seq_pages_are_bounded_without_deleting_evidence() {
+    use ael3_lib::agent::{TERMINAL_PREVIEW_MAX_BYTES, TERMINAL_PREVIEW_MAX_CHUNKS};
+    let state = common::temp_state();
+    let task = make_task(&state);
+    // Both runtime paths persist into the same transcript and use the same
+    // snapshot reader. No real PTY/ACP process or API call is started here.
+    for name in ["pty-fixture", "acp-fixture"] {
+        let session = make_session_with(name, &task, "fixture");
+        state.db.insert_agent_session(&session).unwrap();
+        for seq in 1..=1505 {
+            state
+                .db
+                .append_terminal_chunk(&TerminalChunk {
+                    session_id: name.into(),
+                    seq,
+                    direction: TerminalDirection::Output,
+                    text: format!("{seq}:{}", "x".repeat(1024)),
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                })
+                .unwrap();
+        }
+        let reader = state.db.terminal_reader().unwrap();
+        let snapshot = state.agents.snapshot(&reader, name).unwrap();
+        assert!(snapshot.truncated);
+        assert!(snapshot.chunks.len() <= TERMINAL_PREVIEW_MAX_CHUNKS);
+        assert!(
+            snapshot.chunks.iter().map(|c| c.text.len()).sum::<usize>()
+                <= TERMINAL_PREVIEW_MAX_BYTES
+        );
+        assert_eq!(snapshot.last_seq, Some(1505));
+        assert!(snapshot
+            .chunks
+            .windows(2)
+            .all(|pair| pair[0].seq < pair[1].seq));
+        assert_eq!(
+            snapshot.first_seq,
+            snapshot.chunks.first().map(|chunk| chunk.seq)
+        );
+        assert_eq!(
+            state.db.list_terminal_chunks(name, None).unwrap().len(),
+            1505
+        );
+        assert_eq!(state.db.get_agent_session(name).unwrap().last_seq, 1505);
+
+        let mut after = 0;
+        let mut count = 0;
+        loop {
+            let page = state
+                .agents
+                .list_chunks(&reader, name, Some(after))
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            assert!(page.len() <= TERMINAL_PREVIEW_MAX_CHUNKS);
+            assert!(page.iter().map(|c| c.text.len()).sum::<usize>() <= TERMINAL_PREVIEW_MAX_BYTES);
+            assert_eq!(page.first().unwrap().seq, after + 1);
+            after = page.last().unwrap().seq;
+            count += page.len();
+        }
+        assert_eq!(count, 1505);
+        assert_eq!(after, 1505);
+    }
+}
+
+#[test]
+fn terminal_snapshot_marks_large_unicode_chunks_and_keeps_full_database_text() {
+    use ael3_lib::agent::TERMINAL_PREVIEW_MAX_BYTES;
+    let state = common::temp_state();
+    let task = make_task(&state);
+    let session = make_session_with("large-fixture", &task, "fixture");
+    state.db.insert_agent_session(&session).unwrap();
+    let original = format!("START{}END", "界".repeat(1_000_000));
+    state
+        .db
+        .append_terminal_chunk(&TerminalChunk {
+            session_id: session.id.clone(),
+            seq: 1,
+            direction: TerminalDirection::Output,
+            text: original.clone(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+        })
+        .unwrap();
+    let snapshot = state.agents.snapshot(&state.db, &session.id).unwrap();
+    assert!(snapshot.truncated);
+    assert_eq!(snapshot.chunks.len(), 1);
+    assert!(snapshot.chunks[0].text.len() <= TERMINAL_PREVIEW_MAX_BYTES);
+    assert!(snapshot.chunks[0].text.ends_with("END"));
+    assert!(snapshot.chunks[0].text.contains("完整记录保留"));
+    assert_eq!(snapshot.first_seq, Some(1));
+    assert_eq!(snapshot.last_seq, Some(1));
+    let page = state
+        .agents
+        .list_chunks(&state.db, &session.id, Some(0))
+        .unwrap();
+    assert!(page[0].text.starts_with("START"));
+    assert!(page[0].text.len() <= TERMINAL_PREVIEW_MAX_BYTES);
+    assert!(page[0].text.contains("完整记录保留"));
+    assert_eq!(
+        state.db.list_terminal_chunks(&session.id, None).unwrap()[0].text,
+        original
+    );
+}
+
+#[test]
 fn agent_profile_session_and_chunks_persist() {
     let state = common::temp_state();
     let task_id = make_task(&state);

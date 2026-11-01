@@ -24,7 +24,7 @@ use crate::models::{
 use crate::util::silent_command;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -47,6 +47,10 @@ const SIGNATURE_HIT_EVENT: &str = "guard://signature-hit";
 
 const BUDGET_RULE_ID: &str = "budget";
 const OUTPUT_QUEUE_CAPACITY: usize = 512;
+pub const TERMINAL_PREVIEW_MAX_CHUNKS: usize = 1_000;
+pub const TERMINAL_PREVIEW_MAX_BYTES: usize = 1_048_576;
+const TERMINAL_TRUNCATION_MARKER: &str =
+    "\r\n[AEL] 此输出块仅显示部分内容；完整记录保留在本机会话数据库。\r\n";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -214,6 +218,70 @@ pub struct StartAgentOptions {
 pub struct AgentSnapshot {
     pub session: AgentSession,
     pub chunks: Vec<TerminalChunk>,
+    pub truncated: bool,
+    pub first_seq: Option<u64>,
+    pub last_seq: Option<u64>,
+}
+
+/// Bound the rendered copy only. The original chunk is still persisted in full.
+pub(crate) fn terminal_preview_text(
+    text: &str,
+    max_bytes: usize,
+    from_end: bool,
+    already_truncated: bool,
+) -> (String, bool) {
+    if !already_truncated && text.len() <= max_bytes {
+        return (text.to_string(), false);
+    }
+    let available = max_bytes.saturating_sub(TERMINAL_TRUNCATION_MARKER.len());
+    let body = if from_end {
+        let mut start = text.len().saturating_sub(available);
+        while start < text.len() && !text.is_char_boundary(start) {
+            start += 1;
+        }
+        &text[start..]
+    } else {
+        let mut end = text.len().min(available);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    };
+    if max_bytes < TERMINAL_TRUNCATION_MARKER.len() {
+        return (String::new(), true);
+    }
+    if from_end {
+        (format!("{TERMINAL_TRUNCATION_MARKER}{body}"), true)
+    } else {
+        (format!("{body}{TERMINAL_TRUNCATION_MARKER}"), true)
+    }
+}
+
+#[derive(Default)]
+struct TerminalHistoryBuffer {
+    chunks: VecDeque<TerminalChunk>,
+    bytes: usize,
+}
+impl TerminalHistoryBuffer {
+    fn push(&mut self, chunk: &TerminalChunk) {
+        let (text, _) = terminal_preview_text(&chunk.text, TERMINAL_PREVIEW_MAX_BYTES, true, false);
+        let cached = TerminalChunk {
+            session_id: chunk.session_id.clone(),
+            seq: chunk.seq,
+            direction: chunk.direction.clone(),
+            text,
+            created_at: chunk.created_at.clone(),
+        };
+        self.bytes += cached.text.len();
+        self.chunks.push_back(cached);
+        while self.chunks.len() > TERMINAL_PREVIEW_MAX_CHUNKS
+            || self.bytes > TERMINAL_PREVIEW_MAX_BYTES
+        {
+            if let Some(oldest) = self.chunks.pop_front() {
+                self.bytes -= oldest.text.len();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -269,7 +337,7 @@ struct RuntimeSession {
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     output_tx: Option<SyncSender<String>>,
     dropped_output: u64,
-    chunks: Vec<TerminalChunk>,
+    chunks: TerminalHistoryBuffer,
     pending_output: String,
     auto_ingest: bool,
     // v2 预算熔断计量
@@ -447,7 +515,7 @@ impl AgentRuntime {
                     child: child.clone(),
                     output_tx: Some(output_tx),
                     dropped_output: 0,
-                    chunks: Vec::new(),
+                    chunks: TerminalHistoryBuffer::default(),
                     pending_output: String::new(),
                     auto_ingest: opts.auto_ingest.unwrap_or(true),
                     input_chars: 0,
@@ -760,8 +828,16 @@ impl AgentRuntime {
 
     pub fn snapshot(&self, db: &Db, session_id: &str) -> AelResult<AgentSnapshot> {
         let session = db.get_agent_session(session_id)?;
-        let chunks = db.list_terminal_chunks(session_id, None)?;
-        Ok(AgentSnapshot { session, chunks })
+        let (chunks, truncated) = db.terminal_chunk_page(session_id, None, true)?;
+        let first_seq = chunks.first().map(|chunk| chunk.seq);
+        let last_seq = chunks.last().map(|chunk| chunk.seq);
+        Ok(AgentSnapshot {
+            session,
+            chunks,
+            truncated,
+            first_seq,
+            last_seq,
+        })
     }
 
     pub fn list_chunks(
@@ -770,7 +846,8 @@ impl AgentRuntime {
         session_id: &str,
         after_seq: Option<u64>,
     ) -> AelResult<Vec<TerminalChunk>> {
-        db.list_terminal_chunks(session_id, after_seq)
+        db.terminal_chunk_page(session_id, after_seq, false)
+            .map(|(chunks, _)| chunks)
     }
 
     // ── 海关:扣留队列 / 人工裁决 ────────────────────────────────
@@ -1552,16 +1629,25 @@ fn make_chunk(
     direction: TerminalDirection,
     text: String,
 ) -> TerminalChunk {
-    session.session.last_seq += 1;
-    session.session.updated_at = now_iso();
+    let chunk = next_terminal_chunk(&mut session.session, direction, text);
+    session.chunks.push(&chunk);
+    chunk
+}
+
+fn next_terminal_chunk(
+    session: &mut AgentSession,
+    direction: TerminalDirection,
+    text: String,
+) -> TerminalChunk {
+    session.last_seq += 1;
+    session.updated_at = now_iso();
     let chunk = TerminalChunk {
-        session_id: session.session.id.clone(),
-        seq: session.session.last_seq,
+        session_id: session.id.clone(),
+        seq: session.last_seq,
         direction,
         text,
-        created_at: session.session.updated_at.clone(),
+        created_at: session.updated_at.clone(),
     };
-    session.chunks.push(chunk.clone());
     chunk
 }
 
@@ -1611,4 +1697,50 @@ fn mark_start_failed(db: &Db, session: &mut AgentSession) -> AelResult<()> {
     session.updated_at = now_iso();
     session.ended_at = Some(session.updated_at.clone());
     db.update_agent_session(session)
+}
+
+#[cfg(test)]
+mod terminal_cache_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_cache_is_bounded_without_reusing_sequence_or_mutating_evidence() {
+        let mut session = AgentSession {
+            id: "synthetic-session".into(),
+            task_id: "task".into(),
+            profile_id: "codex".into(),
+            agent_id: "codex".into(),
+            status: AgentSessionStatus::Running,
+            cwd: "fixture".into(),
+            command_line: "fixture".into(),
+            started_at: now_iso(),
+            updated_at: now_iso(),
+            ended_at: None,
+            exit_code: None,
+            last_seq: 0,
+        };
+        let mut cache = TerminalHistoryBuffer::default();
+        for expected_seq in 1..=5000 {
+            let original =
+                next_terminal_chunk(&mut session, TerminalDirection::Output, "x".repeat(1024));
+            cache.push(&original);
+            assert_eq!(original.seq, expected_seq);
+            assert_eq!(original.text.len(), 1024);
+            assert!(cache.chunks.len() <= TERMINAL_PREVIEW_MAX_CHUNKS);
+            assert!(cache.bytes <= TERMINAL_PREVIEW_MAX_BYTES);
+        }
+        assert_eq!(session.last_seq, 5000);
+        assert!(cache.chunks.front().unwrap().seq > 1);
+        let original = next_terminal_chunk(
+            &mut session,
+            TerminalDirection::Output,
+            "界".repeat(1_000_000),
+        );
+        cache.push(&original);
+        assert_eq!(original.text.len(), 3_000_000);
+        assert_eq!(original.seq, 5001);
+        assert_eq!(session.last_seq, 5001);
+        assert!(cache.bytes <= TERMINAL_PREVIEW_MAX_BYTES);
+        assert!(cache.chunks.back().unwrap().text.contains("完整记录保留"));
+    }
 }
