@@ -1,8 +1,8 @@
 [package]
 name = "ael3"
-version = "0.1.0"
+version = "3.0.0"
 edition = "2021"
-description = "AEL3 — Agent Experience Layer (Tauri backend)"
+description = "AEL3 — AI Engineering Ledger (Tauri backend)"
 default-run = "ael3"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

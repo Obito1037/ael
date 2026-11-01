@@ -48,6 +48,21 @@ The above copyright notice and this permission notice shall be included in all c
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 
+## 软件工程课程报告
+
+课程项目文档按“文档即代码”存放在 [`docs/report/`](docs/report/)：
+
+1. [选题与 NABCD](docs/report/01-选题与NABCD.md)
+2. [需求分析](docs/report/02-需求分析.md)
+3. [原型与概要设计](docs/report/03-原型与概要设计.md)
+4. [详细设计](docs/report/04-详细设计.md)
+5. [实现与代码对照](docs/report/05-实现与代码对照.md)
+6. [测试计划与用例](docs/report/06-测试计划与用例.md)
+7. [测试报告](docs/report/07-测试报告.md)
+8. [用户反馈](docs/report/08-用户反馈.md)
+
+操作手册见 [`docs/AEL-使用说明.md`](docs/AEL-使用说明.md)。
+
 ## 架构
 
 ```
@@ -114,6 +129,6 @@ cargo test --test governance_tests -j 2
 ## 契约
 
 - `design/REWRITE-2.0.md`:2.0 重写总规格(实现事实来源)
-- `contracts/schema.sql`:SQLite schema v4(治理层基线,已冻结)
+- `contracts/schema.sql`:SQLite schema v4 基线;v5、v6 见 `contracts/migrations/`,当前版本为 v6
 - `contracts/policy-default.toml`:海关默认策略
 - `src-tauri/src/models.rs`:领域模型 v2(与前端 `src/types.ts` 逐字段对齐)

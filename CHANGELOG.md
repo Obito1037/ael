@@ -1,0 +1,37 @@
+# 更新日志
+
+版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
+
+## 3.0.0 - 2026-11-01
+
+### 新增
+
+- 跨 Agent 治理层：ACP 结构化会话、本机历史扫描、候选记忆质量门。
+- 记忆学习与复用交互演示。
+- 设置页的 Codex 模型选项，默认 `gpt-5.6-luna`。
+- GitHub Actions、Dependabot、ESLint、真实桌面验证脚本。
+- 课程报告（`docs/report/`）。
+
+### 修复
+
+- **Codex 的危险命令绕过海关**：以 read-only 模式启动，权限请求按 `policy.toml` 裁决。
+- ACP 失败时没有回退到 PTY。
+- 适配器使用 `@latest` 导致不可复现，缺少平台依赖。
+- 工作目录的 `\?\` 前缀。
+- 启动上下文被当作命令输入 Shell。
+- 启动 Agent 被 30 秒 IPC 超时打断。
+- PTY 模式下提示词丢失。
+- 历史扫描和终端回放无上限导致的卡顿和闪退。
+
+### 已知限制
+
+- PTY 通道只能裁决从 AEL 输入的内容。
+- Claude Code、Gemini 未用真实 Agent 验证。
+
+## 2.0.0 - 2026-07-28
+
+运行时海关、Review Brief、Agent Blame、活文档 ADR。
+
+## 1.0.0 - 2026-07-26
+
+经验层内核：PTY 执行、证据链、收尾、经验库、约束注入。
