@@ -1,3 +1,5 @@
 allowBuilds:
+  # The published runtime is prebuilt; postinstall only sends telemetry.
+  '@openuidev/lang-core': false
   esbuild: true
   msw: true
