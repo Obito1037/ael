@@ -15,8 +15,10 @@ use crate::util::now_iso;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
+use sha1::{Digest, Sha1};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy)]
@@ -74,10 +76,38 @@ struct SourceFile {
     path: PathBuf,
 }
 
+const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CONVERSATION_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CONVERSATION_MESSAGES: usize = 100_000;
+const MAX_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct ParseLimits {
+    line_bytes: usize,
+    conversation_bytes: usize,
+    messages: usize,
+}
+const PARSE_LIMITS: ParseLimits = ParseLimits {
+    line_bytes: MAX_LINE_BYTES,
+    conversation_bytes: MAX_CONVERSATION_BYTES,
+    messages: MAX_CONVERSATION_MESSAGES,
+};
+
+struct ParsedSource {
+    input: Option<HistoryConversationInput>,
+    skipped_lines: i64,
+}
+
+fn record_warning(count: &mut HistorySourceCount, path: &Path, message: &str) {
+    if count.warnings.len() < 20 {
+        count
+            .warnings
+            .push(format!("{}: {message}", path.display()));
+    }
+}
+
 /// Scan all supported local sources. No network call, API key, or LLM is used.
 pub fn scan(db: &Db) -> AelResult<HistoryScanSummary> {
-    let started_at = now_iso();
-    let scan_id = Db::new_history_scan_id();
     let mut files = Vec::new();
     let home = home_dir();
 
@@ -113,6 +143,12 @@ pub fn scan(db: &Db) -> AelResult<HistoryScanSummary> {
         );
     }
 
+    scan_files(db, files)
+}
+
+fn scan_files(db: &Db, files: Vec<SourceFile>) -> AelResult<HistoryScanSummary> {
+    let started_at = now_iso();
+    let scan_id = Db::new_history_scan_id();
     let mut source_counts: BTreeMap<String, HistorySourceCount> = BTreeMap::new();
     for kind in [
         SourceKind::Claude,
@@ -132,40 +168,71 @@ pub fn scan(db: &Db) -> AelResult<HistoryScanSummary> {
     let mut messages = 0_i64;
 
     for source in files.iter().filter(|source| !is_sqlite_path(&source.path)) {
-        let Some(input) = parse_json_source(&source.kind, &source.path) else {
+        let entry = source_counts
+            .get_mut(source.kind.id())
+            .expect("registered source kind");
+        let parsed = match parse_json_source(&source.kind, &source.path, PARSE_LIMITS) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                entry.skipped_files += 1;
+                record_warning(entry, &source.path, &message);
+                continue;
+            }
+        };
+        entry.skipped_lines += parsed.skipped_lines;
+        if parsed.skipped_lines > 0 {
+            record_warning(
+                entry,
+                &source.path,
+                &format!("跳过 {} 行无效或超过 4 MiB 的记录", parsed.skipped_lines),
+            );
+        }
+        let Some(input) = parsed.input else {
             continue;
         };
         let message_count = input.messages.len() as i64;
-        if db.replace_history_conversation(&input).is_ok() {
-            conversations += 1;
-            messages += message_count;
-            let entry = source_counts
-                .entry(source.kind.id().to_string())
-                .or_insert_with(|| HistorySourceCount {
-                    source_agent: source.kind.id().to_string(),
-                    ..HistorySourceCount::default()
-                });
-            entry.sessions += 1;
-            entry.messages += message_count;
+        match db.replace_history_conversation(&input) {
+            Ok(_) => {
+                conversations += 1;
+                messages += message_count;
+                entry.sessions += 1;
+                entry.messages += message_count;
+            }
+            Err(error) => {
+                entry.skipped_files += 1;
+                record_warning(
+                    entry,
+                    &source.path,
+                    &format!("索引写入失败 ({})，保留旧索引", error.code),
+                );
+            }
         }
     }
 
     // OpenCode has used SQLite in different releases. We discover database
     // files separately and read only text-bearing rows from a read-only handle.
     for source in files.iter().filter(|source| is_sqlite_path(&source.path)) {
-        for input in parse_opencode_sqlite(&source.path) {
+        let entry = source_counts
+            .get_mut(SourceKind::OpenCode.id())
+            .expect("registered source kind");
+        let inputs = match parse_opencode_sqlite(&source.path) {
+            Ok(inputs) => inputs,
+            Err(message) => {
+                entry.skipped_files += 1;
+                record_warning(entry, &source.path, &message);
+                continue;
+            }
+        };
+        for input in inputs {
             let message_count = input.messages.len() as i64;
             if db.replace_history_conversation(&input).is_ok() {
                 conversations += 1;
                 messages += message_count;
-                let entry = source_counts
-                    .entry(SourceKind::OpenCode.id().to_string())
-                    .or_insert_with(|| HistorySourceCount {
-                        source_agent: SourceKind::OpenCode.id().to_string(),
-                        ..HistorySourceCount::default()
-                    });
                 entry.sessions += 1;
                 entry.messages += message_count;
+            } else {
+                entry.skipped_files += 1;
+                record_warning(entry, &source.path, "SQLite 会话索引写入失败，保留旧索引");
             }
         }
     }
@@ -198,24 +265,31 @@ fn collect_files(
     out: &mut Vec<SourceFile>,
     extensions: &BTreeSet<&str>,
 ) {
-    if !root.is_dir() {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files(&path, kind, out, extensions);
-            continue;
-        }
-        let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
+    let mut pending = vec![root.to_path_buf()];
+    let mut visited = BTreeSet::new();
+    while let Some(directory) = pending.pop() {
+        // Junctions/symlinks can form cycles on real developer machines.
+        let Ok(canonical) = fs::canonicalize(&directory) else {
             continue;
         };
-        let ext = ext.to_ascii_lowercase();
-        if extensions.contains(ext.as_str()) {
-            out.push(SourceFile { kind, path });
+        if !visited.insert(canonical) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
+                continue;
+            };
+            if extensions.contains(ext.to_ascii_lowercase().as_str()) {
+                out.push(SourceFile { kind, path });
+            }
         }
     }
 }
@@ -232,32 +306,106 @@ fn is_sqlite_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn parse_json_source(kind: &SourceKind, path: &Path) -> Option<HistoryConversationInput> {
-    let content = fs::read_to_string(path).ok()?;
+/// Read one record without allowing a malicious/unbroken line to grow the buffer.
+/// Hash even skipped bytes, so source_hash still represents the original file.
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    limit: usize,
+    hash: &mut Sha1,
+) -> std::io::Result<Option<bool>> {
+    line.clear();
+    let mut total = 0usize;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok((total > 0).then_some(total > limit));
+        }
+        let take = available
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(available.len(), |i| i + 1);
+        let finished = available[take - 1] == b'\n';
+        hash.update(&available[..take]);
+        let keep = take.min(limit.saturating_sub(line.len()));
+        line.extend_from_slice(&available[..keep]);
+        total = total.saturating_add(take);
+        reader.consume(take);
+        if finished {
+            return Ok(Some(total > limit));
+        }
+    }
+}
+
+fn parse_json_source(
+    kind: &SourceKind,
+    path: &Path,
+    limits: ParseLimits,
+) -> Result<ParsedSource, String> {
+    let file = fs::File::open(path).map_err(|_| "无法读取源文件，保留旧索引".to_string())?;
+    if file.metadata().map_err(|_| "无法读取文件属性")?.len() > MAX_SOURCE_BYTES {
+        return Err("源文件超过 512 MiB 上限，保留旧索引".into());
+    }
+    // A source may still be appended by its Agent while scanning. Bound the
+    // actual read as well as the initial metadata check.
+    let mut reader = BufReader::with_capacity(64 * 1024, file.take(MAX_SOURCE_BYTES + 1));
+    let mut line = Vec::new();
+    let mut hash = Sha1::new();
     let fallback = file_time(path);
     let mut messages = Vec::new();
     let mut session_id = None;
     let mut repo_path = None;
-
-    for (index, raw) in content.lines().enumerate() {
-        let value: Value = match serde_json::from_str(raw) {
+    let mut line_number = 0_i64;
+    let mut skipped_lines = 0_i64;
+    let mut retained_bytes = 0usize;
+    while let Some(oversized) =
+        read_bounded_line(&mut reader, &mut line, limits.line_bytes, &mut hash)
+            .map_err(|_| "读取源文件失败，保留旧索引")?
+    {
+        line_number += 1;
+        if oversized {
+            skipped_lines += 1;
+            continue;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&line) {
             Ok(value) => value,
-            Err(_) => continue,
+            Err(_) => {
+                skipped_lines += 1;
+                continue;
+            }
         };
         session_id = session_id.or_else(|| find_string(&value, SESSION_KEYS));
         repo_path = repo_path.or_else(|| find_path(&value));
-        if let Some(message) = message_from_value(&value, index as i64 + 1, &fallback) {
+        if let Some(message) = message_from_value(&value, line_number, &fallback) {
+            retained_bytes = retained_bytes
+                .saturating_add(message.text.len())
+                .saturating_add(message.payload_json.as_ref().map_or(0, String::len));
+            if retained_bytes > limits.conversation_bytes || messages.len() >= limits.messages {
+                return Err(
+                    "归一化会话超过内存/消息数上限（64 MiB / 100000 条），整份文件跳过并保留旧索引"
+                        .into(),
+                );
+            }
             messages.push(message);
         }
     }
+    if reader.get_ref().limit() == 0 {
+        return Err("扫描期间源文件增长到超过 512 MiB，保留旧索引".into());
+    }
 
     if messages.is_empty() {
-        return None;
+        return Ok(ParsedSource {
+            input: None,
+            skipped_lines,
+        });
     }
     let source_path = canonical_or_original(path);
     let source_session_id =
         session_id.unwrap_or_else(|| format!("file-{}", stable_hash(&source_path)));
-    let source_hash = stable_hash(&content);
+    let source_hash = format!("{:x}", hash.finalize());
     let id = Db::next_history_id(&format!(
         "{}|{}|{}",
         kind.id(),
@@ -275,17 +423,20 @@ fn parse_json_source(kind: &SourceKind, path: &Path) -> Option<HistoryConversati
         .map(|message| message.created_at.clone())
         .unwrap_or_else(|| fallback.clone());
 
-    Some(HistoryConversationInput {
-        id,
-        source_agent: kind.id().into(),
-        source_path,
-        source_session_id,
-        title,
-        repo_path,
-        created_at,
-        updated_at: fallback,
-        source_hash,
-        messages,
+    Ok(ParsedSource {
+        input: Some(HistoryConversationInput {
+            id,
+            source_agent: kind.id().into(),
+            source_path,
+            source_session_id,
+            title,
+            repo_path,
+            created_at,
+            updated_at: fallback,
+            source_hash,
+            messages,
+        }),
+        skipped_lines,
     })
 }
 
@@ -331,26 +482,34 @@ fn message_from_value(value: &Value, line: i64, fallback: &str) -> Option<Histor
     })
 }
 
-fn parse_opencode_sqlite(path: &Path) -> Vec<HistoryConversationInput> {
-    let Ok(conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
-        return Vec::new();
-    };
+fn parse_opencode_sqlite(path: &Path) -> Result<Vec<HistoryConversationInput>, String> {
+    if path
+        .metadata()
+        .map_err(|_| "无法读取 SQLite 文件属性")?
+        .len()
+        > MAX_SOURCE_BYTES
+    {
+        return Err("SQLite 来源超过 512 MiB 上限，保留旧索引".into());
+    }
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| "无法只读打开 SQLite 来源")?;
     let Ok(mut tables) = conn
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
     else {
-        return Vec::new();
+        return Err("无法读取 SQLite 来源表结构".into());
     };
     let table_names: Vec<String> = tables
         .query_map([], |row| row.get(0))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .collect();
+        .map_err(|_| "无法枚举 SQLite 来源表")?
+        .collect::<Result<_, _>>()
+        .map_err(|_| "SQLite 来源表结构无效")?;
     drop(tables);
 
     let mut result = Vec::new();
+    let mut retained_bytes = 0usize;
+    let mut message_count = 0usize;
     for table in table_names {
-        let columns = table_columns(&conn, &table);
+        let columns = table_columns(&conn, &table)?;
         let Some(text_col) = columns.iter().find(|column| {
             matches!(
                 column.as_str(),
@@ -377,31 +536,51 @@ fn parse_opencode_sqlite(path: &Path) -> Vec<HistoryConversationInput> {
             .find(|column| column.as_str() == "role")
             .cloned();
         let query = format!(
-            "SELECT rowid, {}, {}, {}, {} FROM {} LIMIT 10000",
-            quote_ident(text_col),
+            "SELECT rowid, {}, {}, {}, {} FROM {}",
+            bounded_column(text_col),
             optional_column(id_col.as_deref()),
             optional_column(time_col.as_deref()),
             optional_column(role_col.as_deref()),
             quote_ident(&table)
         );
-        let Ok(mut rows) = conn.prepare(&query) else {
-            continue;
-        };
+        let mut rows = conn
+            .prepare(&query)
+            .map_err(|_| "无法读取 SQLite 来源消息表")?;
         let mut messages = Vec::new();
         let fallback = file_time(path);
         let mapped = rows.query_map([], |row| {
             let rowid: i64 = row.get(0)?;
+            // SQL already rejects oversized fields; inspect byte length
+            // before making any Rust String allocation (UTF-8 may be multibyte).
+            for column in 1..=4 {
+                if matches!(row.get_ref(column)?, rusqlite::types::ValueRef::Text(bytes) if bytes.len() > MAX_LINE_BYTES) {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+            }
             let text: Option<String> = row.get(1)?;
             let id: Option<String> = row.get(2)?;
             let created: Option<String> = row.get(3)?;
             let role: Option<String> = row.get(4)?;
             Ok((rowid, text, id, created, role))
-        });
-        if let Ok(mapped) = mapped {
-            for row in mapped.flatten() {
+        }).map_err(|_| "无法查询 SQLite 来源消息")?;
+        {
+            for row in mapped {
+                let row =
+                    row.map_err(|_| "SQLite 来源包含无法解析或超过 4 MiB 的消息，保留旧索引")?;
                 let Some(text) = row.1.filter(|text| !text.trim().is_empty()) else {
                     continue;
                 };
+                retained_bytes = retained_bytes
+                    .saturating_add(text.len())
+                    .saturating_add(row.2.as_ref().map_or(0, String::len))
+                    .saturating_add(row.3.as_ref().map_or(0, String::len))
+                    .saturating_add(row.4.as_ref().map_or(0, String::len));
+                message_count += 1;
+                if retained_bytes > MAX_CONVERSATION_BYTES
+                    || message_count > MAX_CONVERSATION_MESSAGES
+                {
+                    return Err("SQLite 来源超过内存/消息数上限，整份文件跳过并保留旧索引".into());
+                }
                 messages.push(HistoryMessageInput {
                     id: Db::next_history_message_id(&format!(
                         "{}|{}|{}",
@@ -439,23 +618,29 @@ fn parse_opencode_sqlite(path: &Path) -> Vec<HistoryConversationInput> {
             messages,
         });
     }
-    result
+    Ok(result)
 }
 
-fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, String> {
     let query = format!("PRAGMA table_info({})", quote_ident(table));
-    let Ok(mut stmt) = conn.prepare(&query) else {
-        return Vec::new();
-    };
-    stmt.query_map([], |row| row.get(1))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .collect()
+    let mut stmt = conn.prepare(&query).map_err(|_| "无法读取 SQLite 表字段")?;
+    let columns = stmt
+        .query_map([], |row| row.get(1))
+        .map_err(|_| "无法查询 SQLite 表字段")?
+        .collect::<Result<_, _>>()
+        .map_err(|_| "SQLite 表字段无效".to_string())?;
+    Ok(columns)
 }
 
 fn optional_column(column: Option<&str>) -> String {
-    column.map(quote_ident).unwrap_or_else(|| "NULL".into())
+    column.map(bounded_column).unwrap_or_else(|| "NULL".into())
+}
+
+fn bounded_column(column: &str) -> String {
+    // A zero-byte BLOB fails the expected TEXT decoding without returning the
+    // oversized value to Rust. Byte length also catches embedded NUL text.
+    let column = quote_ident(column);
+    format!("CASE WHEN length(CAST({column} AS BLOB)) > {MAX_LINE_BYTES} THEN zeroblob(0) ELSE {column} END")
 }
 
 fn quote_ident(value: &str) -> String {
@@ -590,10 +775,162 @@ fn truncate(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_kind, infer_role, message_from_value, parse_opencode_sqlite};
+    use super::*;
     use rusqlite::Connection;
     use serde_json::json;
+    use std::io::Write;
     use std::path::PathBuf;
+
+    fn fixture_root() -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("ael-history-stability-{}", crate::util::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn history_stability_streams_large_jsonl_and_preserves_every_normal_record() {
+        let root = fixture_root();
+        let path = root.join("large.jsonl");
+        let mut file = fs::File::create(&path).unwrap();
+        let mut expected_hash = Sha1::new();
+        for i in 0..20_000 {
+            let record = format!(
+                "{}\n",
+                json!({"id":format!("message-{i}"),"role":"user","text":"a".repeat(480)})
+            );
+            file.write_all(record.as_bytes()).unwrap();
+            expected_hash.update(record.as_bytes());
+        }
+        drop(file);
+        assert!(path.metadata().unwrap().len() > 10_000_000);
+        let parsed = parse_json_source(&SourceKind::Codex, &path, PARSE_LIMITS).unwrap();
+        assert_eq!(parsed.skipped_lines, 0);
+        let input = parsed.input.unwrap();
+        assert_eq!(input.messages.len(), 20_000);
+        assert_eq!(input.messages.last().unwrap().span_start, Some(20_000));
+        assert_eq!(input.source_hash, format!("{:x}", expected_hash.finalize()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_stability_skips_malformed_and_oversized_lines_then_resumes() {
+        let root = fixture_root();
+        let path = root.join("mixed.jsonl");
+        let mut file = fs::File::create(&path).unwrap();
+        writeln!(file, "{}", json!({"id":"first","text":"valid before"})).unwrap();
+        writeln!(file, "not json").unwrap();
+        file.write_all(&vec![b'x'; MAX_LINE_BYTES + 1024]).unwrap();
+        file.write_all(b"\n").unwrap();
+        writeln!(file, "{}", json!({"id":"last","text":"valid after"})).unwrap();
+        drop(file);
+        let parsed = parse_json_source(&SourceKind::Codex, &path, PARSE_LIMITS).unwrap();
+        assert_eq!(parsed.skipped_lines, 2);
+        let input = parsed.input.unwrap();
+        assert_eq!(input.messages.len(), 2);
+        assert_eq!(input.messages[1].span_start, Some(4));
+        // The physical line buffer never retains the oversized tail.
+        let mut reader = BufReader::new(std::io::Cursor::new(vec![b'x'; 100_000]));
+        let mut line = Vec::new();
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, 1024, &mut Sha1::new()).unwrap(),
+            Some(true)
+        );
+        assert_eq!(line.len(), 1024);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_stability_reports_limits_and_preserves_previous_index() {
+        let root = fixture_root();
+        let path = root.join("source.jsonl");
+        fs::write(
+            &path,
+            format!("{}\n", json!({"id":"original","text":"original evidence"})),
+        )
+        .unwrap();
+        let state = crate::state::AppState::open_at(root.join("db")).unwrap();
+        let first = scan_files(
+            &state.db,
+            vec![SourceFile {
+                kind: SourceKind::Codex,
+                path: path.clone(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(first.conversations, 1);
+        // A sparse oversize source is rejected using metadata, without reading 512 MiB.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_SOURCE_BYTES + 1)
+            .unwrap();
+        let second = scan_files(
+            &state.db,
+            vec![SourceFile {
+                kind: SourceKind::Codex,
+                path: path.clone(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(second.source_counts["codex"].skipped_files, 1);
+        assert!(second.source_counts["codex"].warnings[0].contains("512 MiB"));
+        let conversations = state.db.list_history_conversations(100, 0).unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(
+            state
+                .db
+                .list_history_messages(&conversations[0].id)
+                .unwrap()[0]
+                .text,
+            "original evidence"
+        );
+        let persisted = state.db.latest_history_scan().unwrap().unwrap();
+        assert_eq!(persisted.source_counts["codex"].skipped_files, 1);
+        fs::write(&path, format!("{}\n", json!({"text":"x".repeat(2048)}))).unwrap();
+        assert!(parse_json_source(
+            &SourceKind::Codex,
+            &path,
+            ParseLimits {
+                conversation_bytes: 1024,
+                ..PARSE_LIMITS
+            }
+        )
+        .is_err());
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_stability_rejects_oversized_sqlite_fields_before_copying() {
+        let root = fixture_root();
+        let path = root.join("oversized.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE messages(id TEXT,role TEXT,content TEXT);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO messages VALUES ('m1','user',CAST(zeroblob(?1) AS TEXT))",
+            [MAX_LINE_BYTES as i64 + 1],
+        )
+        .unwrap();
+        drop(conn);
+        let error = parse_opencode_sqlite(&path).unwrap_err();
+        assert!(error.contains("4 MiB"));
+        let state = crate::state::AppState::open_at(root.join("db")).unwrap();
+        let summary = scan_files(
+            &state.db,
+            vec![SourceFile {
+                kind: SourceKind::OpenCode,
+                path,
+            }],
+        )
+        .unwrap();
+        assert_eq!(summary.source_counts["opencode"].skipped_files, 1);
+        assert_eq!(summary.conversations, 0);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn normalizes_common_agent_events_without_llm() {
@@ -628,7 +965,7 @@ mod tests {
         .expect("seed sqlite fixture");
         drop(conn);
 
-        let conversations = parse_opencode_sqlite(&PathBuf::from(&path));
+        let conversations = parse_opencode_sqlite(&PathBuf::from(&path)).expect("read fixture");
         assert_eq!(conversations.len(), 1);
         assert_eq!(conversations[0].source_agent, "opencode");
         assert_eq!(conversations[0].messages.len(), 2);

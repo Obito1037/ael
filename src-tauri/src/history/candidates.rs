@@ -42,7 +42,7 @@ pub fn extract(db: &Db) -> AelResult<CandidateExtractionSummary> {
     };
 
     for conversation in conversations {
-        let messages = db.list_history_messages(&conversation.id)?;
+        let messages = db.list_history_texts_bounded(&conversation.id)?;
         if messages.is_empty() {
             summary.skipped_low_evidence += 1;
             continue;
@@ -75,7 +75,7 @@ pub fn build_distillation_prompt(db: &Db, conversation_id: Option<&str>) -> AelR
     let mut episodes = Vec::new();
     for conversation in conversations {
         let messages = db
-            .list_history_messages(&conversation.id)?
+            .list_history_message_previews(&conversation.id, 40, 0)?
             .into_iter()
             .take(40)
             .map(|message| {
@@ -182,7 +182,7 @@ pub fn ingest_model_json(
     raw: &str,
 ) -> AelResult<CandidateExtractionSummary> {
     let document = parse_distillation(raw)?;
-    let valid_messages = history_message_ids(db)?;
+    let valid_messages = history_message_ids(db, &document)?;
     let mut summary = CandidateExtractionSummary {
         skill_candidates: 0,
         failure_candidates: 0,
@@ -293,11 +293,24 @@ fn parse_distillation(raw: &str) -> AelResult<DistillationDocument> {
         .map_err(|error| AelError::invalid_input(format!("ACP 提炼 JSON 无法解析: {error}")))
 }
 
-fn history_message_ids(db: &Db) -> AelResult<HashSet<String>> {
+fn history_message_ids(db: &Db, document: &DistillationDocument) -> AelResult<HashSet<String>> {
     let mut ids = HashSet::new();
-    for conversation in db.list_history_conversations(500, 0)? {
-        for message in db.list_history_messages(&conversation.id)? {
-            ids.insert(message.id);
+    // Validate only IDs this result actually cites; scanning every historical
+    // body merely to obtain its ID made large indexes unnecessarily expensive.
+    for id in document
+        .skills
+        .iter()
+        .flat_map(|item| &item.source_messages)
+        .chain(
+            document
+                .failures
+                .iter()
+                .flat_map(|item| &item.source_messages),
+        )
+    {
+        let id = id.trim();
+        if !ids.contains(id) && db.history_message_exists(id)? {
+            ids.insert(id.to_string());
         }
     }
     Ok(ids)

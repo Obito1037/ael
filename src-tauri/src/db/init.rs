@@ -46,6 +46,15 @@ pub fn default_paths() -> AelResult<AelPaths> {
 /// 这个小文件，再决定数据库、历史、交接包和备份的实际位置。旧安装没有该
 /// 文件时仍使用默认 `~/.ael`，不会改变既有行为。
 pub fn startup_root() -> AelResult<PathBuf> {
+    // Per-process override for isolated verification and portable installations.
+    // Never change HOME or the user's existing settings to test a new build.
+    if let Some(root) = std::env::var_os("AEL_DATA_DIR") {
+        let path = PathBuf::from(root);
+        if !path.is_absolute() {
+            return Err(AelError::invalid_input("AEL_DATA_DIR 必须为绝对路径"));
+        }
+        return Ok(path);
+    }
     let defaults = default_paths()?;
     if !defaults.settings_file.exists() {
         return Ok(defaults.root);
