@@ -332,11 +332,15 @@ export function Console() {
     try {
       const context = await ipc.buildAgentStartupContext({ taskId: task.id, agentKind: profile.kind, profileId: profile.id });
       if (!mountedRef.current || epoch !== epochRef.current) return;
-      const session = await ipc.startAgentSession({ taskId: task.id, profileId: profile.id, cwd: cwd.trim() || task.repoPath || undefined, initialPrompt: context?.prompt, autoIngest: true, rows: termRef.current?.rows, cols: termRef.current?.cols });
+      const session = await ipc.startAgentSession({ taskId: task.id, profileId: profile.id, cwd: cwd.trim() || task.repoPath || undefined, initialPrompt: profile.kind === "shell" ? undefined : context?.prompt, autoIngest: true, rows: termRef.current?.rows, cols: termRef.current?.cols });
       upsertSession(session);
-      if (!mountedRef.current || epoch !== epochRef.current) return;
+      // ACP handshake can take a minute; selection stays locked meanwhile, so only unmount cancels attaching.
+      if (!mountedRef.current) return;
       await attach(session);
-      if (mountedRef.current) toast(`${profile.displayName} 已启动。`, "success");
+      if (!mountedRef.current) return;
+      const fellBack = ["codex", "claude_code", "gemini"].includes(profile.id) && !session.commandLine.includes("acp");
+      if (fellBack) toast(`${profile.displayName} 的 ACP 通道不可用，已回退到终端模式。原因见失败的会话记录。`, "warning");
+      else toast(`${profile.displayName} 已启动。`, "success");
     } catch (error) {
       if (mountedRef.current) toast(error instanceof Error ? error.message : "启动 Agent 失败，请检查 CLI 和工作目录。", "error");
     } finally {

@@ -414,7 +414,7 @@ impl AgentRuntime {
                 cwd.to_string_lossy()
             )));
         }
-        let cwd = fs::canonicalize(&cwd).unwrap_or(cwd);
+        let cwd = crate::util::canonical_working_dir(&cwd);
 
         let mut args = profile.default_args.clone();
         if let Some(extra) = opts.args.clone() {
@@ -596,7 +596,8 @@ impl AgentRuntime {
         });
 
         // 启动上下文注入走 raw 通道,不经海关(否则可能被 prompt 里的示例命令误扣)。
-        if let Some(prompt) = opts.initial_prompt {
+        // 它是给模型读的 Markdown;交给 Shell 会被逐行当命令执行,所以 Shell 不注入。
+        if let Some(prompt) = opts.initial_prompt.filter(|_| profile.kind != "shell") {
             if !prompt.trim().is_empty() {
                 self.send_input_raw(db, &app, &session_id, format!("{prompt}\r\n"))?;
             }
@@ -1580,7 +1581,7 @@ fn profile_from_spec(spec: AgentSpec) -> AgentProfile {
     }
 }
 
-fn resolve_executable(name: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_executable(name: &str) -> Option<PathBuf> {
     let candidate = PathBuf::from(name);
     if candidate.is_absolute() && candidate.exists() {
         return Some(candidate);
@@ -1595,11 +1596,28 @@ fn resolve_executable(name: &str) -> Option<PathBuf> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
+    pick_runnable(stdout.lines()).map(PathBuf::from)
+}
+
+/// npm 会同时生成无扩展名的 shell 脚本和 .cmd。Windows 上前者无法直接启动，
+/// 而 where.exe 常把它排在第一位，所以优先选可执行扩展名。
+fn pick_runnable<'a>(lines: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let candidates: Vec<&str> = lines
         .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(PathBuf::from)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if cfg!(windows) {
+        let runnable = candidates.iter().find(|line| {
+            let lower = line.to_ascii_lowercase();
+            [".exe", ".cmd", ".bat", ".com"]
+                .iter()
+                .any(|ext| lower.ends_with(ext))
+        });
+        if let Some(line) = runnable {
+            return Some(line);
+        }
+    }
+    candidates.first().copied()
 }
 
 fn read_version(executable: &Path, args: &[&str]) -> Option<String> {
