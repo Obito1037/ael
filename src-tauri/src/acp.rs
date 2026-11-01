@@ -204,7 +204,7 @@ fn agent_for(
         model,
         inherited.as_deref(),
     ))
-        .map_err(|error| agent_client_protocol::util::internal_error(error.to_string()))
+    .map_err(|error| agent_client_protocol::util::internal_error(error.to_string()))
 }
 
 type ReadySender = Arc<Mutex<Option<oneshot::Sender<Result<(), String>>>>>;
@@ -1285,7 +1285,10 @@ mod tests {
             name: id.to_string(),
             kind: kind.to_string(),
         };
-        let options = [option("always", "allow_always"), option("once", "allow_once")];
+        let options = [
+            option("always", "allow_always"),
+            option("once", "allow_once"),
+        ];
         assert_eq!(allow_option(&options).as_deref(), Some("once"));
     }
 
@@ -1298,7 +1301,10 @@ mod tests {
             readable_error(r#"Internal error: {"data":{"details":"bad config"}}"#),
             "bad config"
         );
-        assert_eq!(readable_error(r#"Internal error: {"data":"exit 1"}"#), "exit 1");
+        assert_eq!(
+            readable_error(r#"Internal error: {"data":"exit 1"}"#),
+            "exit 1"
+        );
     }
 
     #[test]

@@ -4,6 +4,9 @@
 //! - commands / engine ····· Claude Code
 //! - db / adapter / handover  Codex(本仓内含可运行的参考实现,签名即契约)
 
+// Tauri 命令的参数就是 IPC 契约字段，拆成结构体会改变前端调用方式。
+#![allow(clippy::too_many_arguments)]
+
 pub mod acp;
 pub mod adapter;
 pub mod agent;

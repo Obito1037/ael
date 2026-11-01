@@ -1658,14 +1658,14 @@ fn next_terminal_chunk(
 ) -> TerminalChunk {
     session.last_seq += 1;
     session.updated_at = now_iso();
-    let chunk = TerminalChunk {
+
+    TerminalChunk {
         session_id: session.id.clone(),
         seq: session.last_seq,
         direction,
         text,
         created_at: session.updated_at.clone(),
-    };
-    chunk
+    }
 }
 
 fn emit_chunk(app: &AppHandle, session_id: &str, chunk: TerminalChunk) {

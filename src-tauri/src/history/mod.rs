@@ -762,7 +762,7 @@ fn file_time(path: &Path) -> String {
         .and_then(|metadata| metadata.modified())
         .ok()
         .and_then(|time| DateTime::<Utc>::from(time).to_rfc3339().into())
-        .unwrap_or_else(|| fallback_time())
+        .unwrap_or_else(fallback_time)
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
