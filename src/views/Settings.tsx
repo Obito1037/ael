@@ -70,7 +70,7 @@ export function SettingsView() {
   }, [handoverTaskId, tasks]);
 
   const patch = <K extends keyof Settings>(key: K, value: Settings[K]) => setForm((current) => current ? { ...current, [key]: value } : current);
-  const dirty = !!form && !!settings && (form.dataDir !== settings.dataDir || form.maxBackups !== settings.maxBackups || form.retrievalMode !== settings.retrievalMode || form.guardMinScore !== settings.guardMinScore);
+  const dirty = !!form && !!settings && (form.dataDir !== settings.dataDir || form.maxBackups !== settings.maxBackups || form.retrievalMode !== settings.retrievalMode || form.guardMinScore !== settings.guardMinScore || form.codexModel !== settings.codexModel);
 
   const save = async () => {
     if (!form || pendingRef.current.save) return;
@@ -176,6 +176,9 @@ export function SettingsView() {
                   </SettingRow>
                   <SettingRow icon={<ShieldCheck className="h-3.5 w-3.5" />} label="Guard 命中阈值" hint="低分历史失败不会触发建议">
                     <div className="flex items-center gap-3"><input type="range" min={0} max={1} step={0.05} value={form?.guardMinScore ?? 0} onChange={(event) => patch("guardMinScore", Number(event.target.value))} className="h-1.5 flex-1 accent-orange" /><span className="w-10 font-mono text-[11px] text-orange">{(form?.guardMinScore ?? 0).toFixed(2)}</span></div>
+                  </SettingRow>
+                  <SettingRow icon={<Search className="h-3.5 w-3.5" />} label="Codex 模型" hint="新会话生效；留空沿用 Codex 配置">
+                    <input aria-label="Codex 模型" disabled={saving} value={form?.codexModel ?? ""} onChange={(event) => patch("codexModel", event.target.value)} placeholder="沿用 Codex 配置" className={inputCls} />
                   </SettingRow>
                   <SettingRow icon={<Database className="h-3.5 w-3.5" />} label="上下文预算" hint="由 policy.toml 的 budget 段控制"><span className="block text-right text-[10.5px] text-ink/48">以运行时策略为准</span></SettingRow>
                   <SettingRow icon={<RefreshCw className="h-3.5 w-3.5" />} label="衰减与重验" hint="当前提供手动重验入口"><span className="block text-right text-[10.5px] text-amber">需手动运行</span></SettingRow>

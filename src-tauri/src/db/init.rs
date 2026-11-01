@@ -123,6 +123,7 @@ impl Settings {
             max_backups: 10,
             retrieval_mode: RetrievalMode::Keyword,
             guard_min_score: 0.35,
+            codex_model: crate::models::default_codex_model(),
         }
     }
 }

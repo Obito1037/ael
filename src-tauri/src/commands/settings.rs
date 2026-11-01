@@ -20,6 +20,7 @@ pub fn set_settings(
     max_backups: Option<u32>,
     retrieval_mode: Option<RetrievalMode>,
     guard_min_score: Option<f64>,
+    codex_model: Option<String>,
 ) -> AelResult<Settings> {
     let mut guard = state.settings.lock().expect("settings mutex poisoned");
     if let Some(v) = data_dir {
@@ -33,6 +34,9 @@ pub fn set_settings(
     }
     if let Some(v) = guard_min_score {
         guard.guard_min_score = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = codex_model {
+        guard.codex_model = v.trim().to_string();
     }
     init::save_settings(&state.db.paths, &guard)?;
     Ok(guard.clone())

@@ -459,6 +459,13 @@ pub struct Settings {
     pub max_backups: u32,
     pub retrieval_mode: RetrievalMode,
     pub guard_min_score: f64,
+    /// Codex 会话使用的模型；留空则沿用 Codex 自己的配置。
+    #[serde(default = "default_codex_model")]
+    pub codex_model: String,
+}
+
+pub fn default_codex_model() -> String {
+    "gpt-5.6-luna".to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

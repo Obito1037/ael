@@ -498,6 +498,7 @@ export interface Settings {
   maxBackups: number;
   retrievalMode: RetrievalMode;
   guardMinScore: number;
+  codexModel: string;
 }
 
 export interface HandoverInclude {

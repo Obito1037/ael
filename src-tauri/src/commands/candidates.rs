@@ -38,7 +38,8 @@ pub async fn distill_history_candidates(
         let profile = profile_id.unwrap_or_else(|| "codex".into());
         let working_dir = cwd.map(PathBuf::from).unwrap_or(std::env::current_dir()?);
         let prompt = candidates::build_distillation_prompt(&db, conversation_id.as_deref())?;
-        let raw = crate::acp::run_json_prompt(&profile, working_dir, prompt)?;
+        let model = app.state::<AppState>().settings_snapshot().codex_model;
+        let raw = crate::acp::run_json_prompt(&profile, working_dir, prompt, Some(&model))?;
         candidates::ingest_model_json(&db, &profile, &raw)
     })
     .await

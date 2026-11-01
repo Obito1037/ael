@@ -914,6 +914,7 @@ export let SETTINGS: Settings = {
   maxBackups: 10,
   retrievalMode: "keyword",
   guardMinScore: 0.35,
+  codexModel: "gpt-5.6-luna",
 };
 export const setSettings = (a: Partial<Settings>): Settings => {
   SETTINGS = { ...SETTINGS, ...a };
