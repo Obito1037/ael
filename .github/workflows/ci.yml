@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main, ael3]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  frontend:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm build
+      - run: node tests/demo-state.mjs
+      - run: node tests/terminal-writer.mjs
+      - run: pnpm exec playwright install chromium
+      - run: pnpm test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+
+  backend:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # tauri::generate_context! reads frontendDist at compile time; tests do not use its contents.
+      - name: Prepare frontend placeholder
+        shell: bash
+        run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
+      - run: cargo fmt --check
+      - run: cargo clippy --lib --tests -- -D warnings
+      - run: cargo test --lib
+      - name: Integration tests, one target at a time
+        shell: bash
+        run: |
+          for target in db_tests governance_tests adapter_tests e2e_tests handover_tests \
+                        scenarios_tests agent_runtime_tests agent_config_tests agent_context_tests; do
+            cargo test --test "$target" -j 2
+          done
