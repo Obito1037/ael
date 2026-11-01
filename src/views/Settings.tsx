@@ -1,6 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  Bot,
   Check,
   ChevronRight,
   Database,
@@ -14,13 +13,13 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { useStore } from "../store";
-import { ipc } from "../lib/ipc";
+import { ipc, isTauri } from "../lib/ipc";
 import { cx } from "../lib/format";
 import { THEMES } from "../themes";
 import { Badge, Button, PageTitle, Panel, Spinner, inputCls } from "../ui";
-import type { AgentProfile, RetrievalMode, Settings } from "../types";
+import type { RetrievalMode, Settings } from "../types";
 
-type SettingsSection = "general" | "memory" | "agents" | "safety";
+type SettingsSection = "general" | "memory" | "safety";
 
 const RETRIEVAL_LABEL: Record<RetrievalMode, string> = {
   keyword: "关键词",
@@ -29,10 +28,10 @@ const RETRIEVAL_LABEL: Record<RetrievalMode, string> = {
 
 function SettingRow({ icon, label, hint, children }: { icon: ReactNode; label: string; hint?: string; children: ReactNode }) {
   return (
-    <div className="grid min-h-[58px] grid-cols-[24px_minmax(150px,1fr)_minmax(220px,1.2fr)] items-center gap-3 border-b border-line px-4 py-2.5 last:border-b-0">
+    <div className="grid min-h-[58px] grid-cols-[24px_minmax(0,1fr)] items-center gap-3 border-b border-line px-4 py-2.5 last:border-b-0 md:grid-cols-[24px_minmax(0,1fr)_minmax(0,1.2fr)]">
       <span className="text-ink/34">{icon}</span>
       <span><span className="block text-[11.5px] text-ink/66">{label}</span>{hint && <span className="block text-[9.5px] text-ink/30">{hint}</span>}</span>
-      <div className="min-w-0">{children}</div>
+      <div className="col-span-2 min-w-0 md:col-span-1">{children}</div>
     </div>
   );
 }
@@ -48,91 +47,92 @@ export function SettingsView() {
   const [form, setForm] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
   const [backing, setBacking] = useState(false);
-  const [agents, setAgents] = useState<AgentProfile[]>([]);
-  const [detecting, setDetecting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [handoverTaskId, setHandoverTaskId] = useState("");
   const [handoverPath, setHandoverPath] = useState("");
   const [policyText, setPolicyText] = useState("");
-  const [providerCount, setProviderCount] = useState(0);
-  const [mcpCount, setMcpCount] = useState(0);
   const [backupReady, setBackupReady] = useState(false);
+  const mountedRef = useRef(false);
+  const pendingRef = useRef({ save: false, backup: false, export: false, import: false });
+  const desktop = isTauri();
 
   useEffect(() => {
-    ipc.getSettings().then((next) => { setSettings(next); setForm(next); }).catch(() => toast("读取设置失败。", "error"));
-    ipc.gateGetPolicyText().then(setPolicyText).catch(() => setPolicyText(""));
-    ipc.listProviders().then((items) => setProviderCount(items.length)).catch(() => setProviderCount(0));
-    ipc.listMcpServers().then((items) => setMcpCount(items.length)).catch(() => setMcpCount(0));
-    void detect();
+    mountedRef.current = true;
+    let active = true;
+    ipc.getSettings().then((next) => { if (active) { setSettings(next); setForm(next); } }).catch(() => { if (active) toast("读取设置失败。", "error"); });
+    ipc.gateGetPolicyText().then((text) => { if (active) setPolicyText(text); }).catch(() => { if (active) setPolicyText(""); });
+    return () => { active = false; mountedRef.current = false; };
   }, []);
 
   useEffect(() => {
     if (!handoverTaskId && tasks[0]) setHandoverTaskId(tasks[0].id);
   }, [handoverTaskId, tasks]);
 
-  const detect = async () => {
-    setDetecting(true);
-    try { setAgents(await ipc.detectAgents()); }
-    catch { toast("探测 Agent 失败。", "error"); }
-    finally { setDetecting(false); }
-  };
-
   const patch = <K extends keyof Settings>(key: K, value: Settings[K]) => setForm((current) => current ? { ...current, [key]: value } : current);
   const dirty = !!form && !!settings && (form.dataDir !== settings.dataDir || form.maxBackups !== settings.maxBackups || form.retrievalMode !== settings.retrievalMode || form.guardMinScore !== settings.guardMinScore);
 
   const save = async () => {
-    if (!form) return;
+    if (!form || pendingRef.current.save) return;
+    pendingRef.current.save = true;
     setSaving(true);
+    const submitted = form;
     try {
-      const next = await ipc.setSettings(form);
+      const next = await ipc.setSettings(submitted);
+      if (!mountedRef.current) return;
       setSettings(next);
-      setForm(next);
-      toast("设置已保存。", "success");
-    } catch { toast("保存设置失败。", "error"); }
-    finally { setSaving(false); }
+      setForm((current) => current === submitted ? next : current);
+      toast(desktop ? "设置已保存。" : "本次演示设置已更新。", "success");
+    } catch { if (mountedRef.current) toast("保存设置失败。", "error"); }
+    finally { pendingRef.current.save = false; if (mountedRef.current) setSaving(false); }
   };
 
   const backup = async () => {
+    if (pendingRef.current.backup) return;
+    pendingRef.current.backup = true;
     setBacking(true);
-    try { const { path } = await ipc.backupNow(); setBackupReady(true); toast(`已备份至 ${path}`, "success"); }
-    catch { toast("备份失败。", "error"); }
-    finally { setBacking(false); }
+    try { const { path } = await ipc.backupNow(); if (mountedRef.current) { setBackupReady(true); toast(`已备份至 ${path}`, "success"); } }
+    catch (error) { if (mountedRef.current) toast(error instanceof Error ? error.message : "备份失败。", "error"); }
+    finally { pendingRef.current.backup = false; if (mountedRef.current) setBacking(false); }
   };
 
   const exportHandover = async () => {
+    if (pendingRef.current.export) return;
     const task = tasks.find((item) => item.id === handoverTaskId) || tasks[0];
     if (!task) return toast("还没有可导出的任务。", "warning");
+    pendingRef.current.export = true;
     setExporting(true);
     try {
       const { path } = await ipc.exportHandover(task.id, { events: true, skills: true, failures: true });
-      toast(`交接包已生成：${path}`, "success");
-    } catch { toast("交接包生成失败。", "error"); }
-    finally { setExporting(false); }
+      if (mountedRef.current) toast(desktop ? `交接包已生成：${path}` : path, "success");
+    } catch { if (mountedRef.current) toast("交接资料生成失败。", "error"); }
+    finally { pendingRef.current.export = false; if (mountedRef.current) setExporting(false); }
   };
 
   const importHandover = async () => {
+    if (pendingRef.current.import) return;
     const path = handoverPath.trim();
     if (!path) return toast("请先粘贴 handover.zip 路径。", "warning");
+    pendingRef.current.import = true;
     setImporting(true);
     try {
       const { taskId } = await ipc.importHandover(path);
       setTasks(await ipc.listTasks());
+      if (!mountedRef.current) return;
       setHandoverTaskId(taskId);
       setHandoverPath("");
       toast(`交接包已导入，新任务：${taskId}`, "success");
     } catch (error) {
-      toast(error instanceof Error ? error.message : "交接包导入失败。", "error");
+      if (mountedRef.current) toast(error instanceof Error ? error.message : "交接包导入失败。", "error");
     } finally {
-      setImporting(false);
+      pendingRef.current.import = false;
+      if (mountedRef.current) setImporting(false);
     }
   };
 
-  const readyAgents = agents.filter((agent) => agent.available).length;
-
   return (
     <div>
-      <PageTitle sub="本地数据、记忆召回、Agent 适配器与启动安全集中在一个安静的控制面。">设置</PageTitle>
+      <PageTitle sub="管理本地数据、记忆召回与交接资料。Agent 连接状态统一在集成页查看。">设置</PageTitle>
 
       <Panel className="overflow-hidden">
         <div className="grid min-h-[620px] grid-cols-1 lg:grid-cols-[150px_minmax(0,1fr)_300px]">
@@ -140,7 +140,6 @@ export function SettingsView() {
             {([
               ["general", "通用", Palette],
               ["memory", "记忆", Search],
-              ["agents", "Agents", Bot],
               ["safety", "安全", ShieldCheck],
             ] as const).map(([id, label, Icon]) => (
               <button type="button" key={id} onClick={() => setSection(id)} className={cx("flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-[11.5px]", section === id ? "bg-orange/[0.08] text-orange" : "text-ink/48 hover:bg-panel2")}>
@@ -151,7 +150,7 @@ export function SettingsView() {
 
           <div className="min-w-0 p-5">
             <div className="mb-4 flex items-center justify-between">
-              <div><h2 className="font-serif text-[20px]">{section === "general" ? "通用设置" : section === "memory" ? "记忆设置" : section === "agents" ? "Agent 适配器" : "安全设置"}</h2><p className="mt-1 text-[10px] text-ink/32">所有更改都会明确保存在本地。</p></div>
+              <div><h2 className="font-serif text-[20px]">{section === "general" ? "通用设置" : section === "memory" ? "记忆设置" : "安全设置"}</h2><p className="mt-1 text-[10px] text-ink/32">{desktop ? "保存后应用到本地设置。" : "浏览器演示：除外观外，设置仅在本次预览中生效。"}</p></div>
               {dirty && <Badge tone="amber">未保存</Badge>}
             </div>
 
@@ -161,11 +160,11 @@ export function SettingsView() {
                   <SettingRow icon={<Palette className="h-3.5 w-3.5" />} label="外观" hint="立即生效">
                     <select value={theme} onChange={(event) => setTheme(event.target.value)} className={inputCls}>{THEMES.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.kind === "light" ? "浅色" : "深色"}</option>)}</select>
                   </SettingRow>
-                  <SettingRow icon={<FolderOpen className="h-3.5 w-3.5" />} label="本地数据目录" hint="重启后生效">
-                    <input value={form?.dataDir || ""} onChange={(event) => patch("dataDir", event.target.value)} className={cx(inputCls, "font-mono text-[10px]")} />
+                  <SettingRow icon={<FolderOpen className="h-3.5 w-3.5" />} label="本地数据目录" hint={desktop ? "重启后生效" : "桌面版可配置；浏览器无法访问本地数据库"}>
+                    <input aria-label="本地数据目录" disabled={!desktop || saving} value={form?.dataDir || ""} onChange={(event) => patch("dataDir", event.target.value)} className={cx(inputCls, "font-mono text-[10px]")} />
                   </SettingRow>
-                  <SettingRow icon={<DatabaseBackup className="h-3.5 w-3.5" />} label="备份、导出与导入">
-                    <div className="flex items-center justify-end gap-2"><span className="text-[10px] text-ink/36">保留 {form?.maxBackups ?? 0} 份</span><input type="number" min={0} value={form?.maxBackups ?? 0} onChange={(event) => patch("maxBackups", Math.max(0, Number(event.target.value) || 0))} className={cx(inputCls, "w-20 text-center")} /><Button variant="ghost" onClick={backup} disabled={backing}>{backing ? <Spinner /> : "立即备份"}</Button></div>
+                  <SettingRow icon={<DatabaseBackup className="h-3.5 w-3.5" />} label="数据库备份" hint={desktop ? "备份保留在本机" : "需在桌面应用中备份真实数据库"}>
+                    <div className="flex items-center justify-end gap-2"><span className="text-[10px] text-ink/36">保留 {form?.maxBackups ?? 0} 份</span><input aria-label="保留备份数" disabled={!desktop || saving} type="number" min={0} value={form?.maxBackups ?? 0} onChange={(event) => patch("maxBackups", Math.max(0, Number(event.target.value) || 0))} className={cx(inputCls, "w-20 text-center")} /><Button variant="ghost" onClick={backup} disabled={backing || !desktop} title={!desktop ? "请在桌面应用中备份本地数据库" : undefined}>{backing ? <Spinner /> : "立即备份"}</Button></div>
                   </SettingRow>
                 </>
               )}
@@ -183,22 +182,9 @@ export function SettingsView() {
                 </>
               )}
 
-              {section === "agents" && (
-                <>
-                  {agents.map((agent) => (
-                    <SettingRow key={agent.id} icon={<Bot className="h-3.5 w-3.5" />} label={agent.displayName} hint={agent.path || agent.executable}>
-                      <div className="flex items-center justify-end gap-3"><span className="font-mono text-[9.5px] text-ink/34">{agent.version || "版本未知"}</span><Badge tone={agent.available ? "green" : "red"}>{agent.available ? "Ready" : "Missing"}</Badge><ChevronRight className="h-3.5 w-3.5 text-ink/20" /></div>
-                    </SettingRow>
-                  ))}
-                  {agents.length === 0 && <div className="px-5 py-10 text-center text-[11px] text-ink/36">尚未检测到 Agent CLI。</div>}
-                </>
-              )}
-
               {section === "safety" && (
                 <>
-                  <SettingRow icon={<ShieldCheck className="h-3.5 w-3.5" />} label="信任等级" hint="危险操作仍需人工确认"><span className="block text-right text-[10.5px] text-ink/52">中</span></SettingRow>
                   <SettingRow icon={<ShieldCheck className="h-3.5 w-3.5" />} label="提示注入防护" hint="由运行时策略和 Agent 行为共同决定"><span className="block text-right text-[10.5px] text-ink/52">策略控制</span></SettingRow>
-                  <SettingRow icon={<RefreshCw className="h-3.5 w-3.5" />} label="启动前自检" hint="当前为手动探测，不会阻塞启动"><span className="block text-right text-[10.5px] text-amber">手动触发</span></SettingRow>
                   <SettingRow icon={<HardDrive className="h-3.5 w-3.5" />} label="执行策略" hint="policy.toml"><button type="button" onClick={() => useStore.getState().setView("gate")} className="flex w-full items-center justify-end gap-2 text-[10.5px] text-orange">打开策略与命令试判 <ChevronRight className="h-3.5 w-3.5" /></button></SettingRow>
                 </>
               )}
@@ -206,34 +192,31 @@ export function SettingsView() {
 
             <div className="mt-5 flex items-center gap-2">
               <Button variant="primary" onClick={save} disabled={!dirty || saving}>{saving ? <Spinner /> : <Save className="h-3.5 w-3.5" />}{saving ? "保存中…" : "保存设置"}</Button>
-              {section === "agents" && <Button variant="ghost" onClick={detect} disabled={detecting}>{detecting ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />}重新探测</Button>}
-              {section === "agents" && <Button variant="primary" onClick={() => useStore.getState().setView("integrations")}><Bot className="h-3.5 w-3.5" />打开集成入口</Button>}
             </div>
           </div>
 
           <aside className="border-t border-line bg-panel2/22 p-5 lg:border-l lg:border-t-0">
-            <h3 className="font-serif text-[18px]">交接状态</h3>
+            <h3 className="font-serif text-[18px]">数据与交接</h3>
             <div className="mt-5 space-y-3">
               {[
-                ["数据库", !!settings, settings ? "已连接" : "检查中"],
-                ["最新备份", backupReady, backupReady ? "本次已生成" : "尚未验证"],
-                ["Adapters", readyAgents === agents.length && agents.length > 0, `${readyAgents} / ${agents.length} 就绪`],
-                ["Provider / MCP", providerCount + mcpCount > 0, `${providerCount} / ${mcpCount} 已配置`],
+                [desktop ? "本地设置" : "演示设置", !!settings, settings ? "已读取" : "尚未读取"],
+                ["数据库备份", backupReady, desktop ? backupReady ? "本次已生成" : "本次未备份" : "仅桌面版"],
                 ["执行策略", policyText.trim().length > 0, policyText.trim() ? "已加载" : "未加载"],
               ].map(([label, ok, value]) => (
                 <div key={String(label)} className="flex items-center gap-2 text-[10.5px]"><span className={cx("grid h-4 w-4 place-items-center rounded-full", ok ? "bg-green/[0.1] text-green" : "bg-amber/[0.1] text-amber")}>{ok ? <Check className="h-2.5 w-2.5" /> : "!"}</span><span className="flex-1 text-ink/52">{label}</span><span className={ok ? "text-green" : "text-amber"}>{value}</span></div>
               ))}
             </div>
-            <div className="mt-6 rounded-xl bg-panel px-4 py-3 text-[10px] leading-relaxed text-ink/40">建议在交接 Agent 前运行自检，确认本地数据库、适配器和策略都能被目标环境读取。</div>
-            <Button variant="ghost" className="mt-5 w-full" onClick={detect} disabled={detecting}>{detecting ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />}运行自检</Button>
+            <div className="mt-6 rounded-xl bg-panel px-4 py-3 text-[11px] leading-relaxed text-ink/50">{desktop ? "交接包包含所选任务的事件、技能与失败记录。导入后生成独立任务。" : "可下载标记为 simulation 的 JSON 演示资料。该文件用于阅读，不是桌面交接 ZIP；备份和 ZIP 导入需在桌面版操作。"}</div>
             <div className="mt-4 space-y-2 border-t border-line pt-4">
-              <select value={handoverTaskId} onChange={(event) => setHandoverTaskId(event.target.value)} className={inputCls} disabled={tasks.length === 0}>
+              <select aria-label="交接任务" value={handoverTaskId} onChange={(event) => setHandoverTaskId(event.target.value)} className={inputCls} disabled={tasks.length === 0 || exporting}>
                 {tasks.length === 0 && <option value="">没有可用任务</option>}
                 {tasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}
               </select>
-              <Button variant="primary" className="w-full" onClick={exportHandover} disabled={exporting || tasks.length === 0}>{exporting ? <Spinner /> : null}{exporting ? "生成中…" : "生成交接包"}</Button>
-              <input value={handoverPath} onChange={(event) => setHandoverPath(event.target.value)} placeholder="粘贴 handover.zip 路径" className={cx(inputCls, "font-mono text-[10px]")} />
-              <Button variant="ghost" className="w-full" onClick={importHandover} disabled={importing || !handoverPath.trim()}>{importing ? <Spinner /> : null}{importing ? "导入中…" : "导入交接包"}</Button>
+              <Button variant="primary" className="w-full" onClick={exportHandover} disabled={exporting || tasks.length === 0}>{exporting ? <Spinner /> : null}{exporting ? "生成中…" : desktop ? "生成交接包" : "下载演示交接数据"}</Button>
+              {desktop && <>
+                <input aria-label="交接包路径" value={handoverPath} onChange={(event) => setHandoverPath(event.target.value)} placeholder="粘贴 handover.zip 路径" className={cx(inputCls, "font-mono text-[10px]")} />
+                <Button variant="ghost" className="w-full" onClick={importHandover} disabled={importing || !handoverPath.trim()}>{importing ? <Spinner /> : null}{importing ? "导入中…" : "导入交接包"}</Button>
+              </>}
             </div>
           </aside>
         </div>

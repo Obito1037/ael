@@ -273,11 +273,23 @@ export const revalidateSkill = (id: string) => {
   s.revalidatedAt = now();
   return s;
 };
-export const searchSkills = (a: { query: string }): RankedSkill[] => {
-  const q = a.query.toLowerCase();
-  return SKILLS.filter(
-    (s) => s.name.toLowerCase().includes(q) || s.trigger.toLowerCase().includes(q),
-  ).map((skill) => ({ skill, score: 0.6 }));
+export const searchSkills = (a: { query: string; status?: Skill["status"]; limit?: number }): RankedSkill[] => {
+  // Preview-only keyword matching: a sentence should match its relevant words,
+  // not require the entire task goal to occur verbatim inside a memory.
+  const query = a.query.trim().toLowerCase();
+  const words = query.match(/[a-z0-9_]+|[\p{Script=Han}]+/gu) || [];
+  const terms = [...new Set(words.flatMap(word => /^[\p{Script=Han}]+$/u.test(word)
+    ? Array.from({ length: Math.max(0, word.length - 1) }, (_, index) => word.slice(index, index + 2))
+    : [word]))];
+  return SKILLS.filter(skill => !a.status || skill.status === a.status)
+    .map(skill => {
+      const text = [skill.name, skill.trigger, ...skill.tags].join(" ").toLowerCase();
+      const matches = terms.filter(term => text.includes(term)).length;
+      return { skill, score: query ? matches / Math.max(1, terms.length) : 1 };
+    })
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(1, a.limit ?? 20));
 };
 export const listFailures = () => FAILURES;
 export const checkFailureGuard = (goal: string, tags?: string[]): GuardResult => {
@@ -622,10 +634,42 @@ export const stopAgentSession = (sessionId: string) => {
 };
 export const listAgentSessions = (a: { taskId?: string } = {}) =>
   SESSIONS.filter((s) => (a.taskId ? s.taskId === a.taskId : true));
-export const getAgentSnapshot = (sessionId: string): AgentSnapshot => ({
-  session: SESSIONS.find((x) => x.id === sessionId)!,
-  chunks: CHUNKS[sessionId] || [],
-});
+function previewMockChunks(source: AgentSnapshot["chunks"], newest: boolean) {
+  const chunks: AgentSnapshot["chunks"] = [];
+  const encoder = new TextEncoder();
+  let usedBytes = 0;
+  let truncated = false;
+  for (let item = 0; item < source.length; item += 1) {
+    const index = newest ? source.length - 1 - item : item;
+    if (chunks.length >= 1000 || usedBytes >= 1_048_576) { truncated = true; break; }
+    const chunk = source[index];
+    const bytes = encoder.encode(chunk.text);
+    const remaining = 1_048_576 - usedBytes;
+    if (bytes.length > remaining) {
+      const marker = "\r\n[AEL] 此输出块仅显示部分内容；完整记录保留在本机会话数据库。\r\n";
+      const available = remaining - encoder.encode(marker).length - 4;
+      if (available > 0) {
+        const body = new TextDecoder().decode(newest ? bytes.slice(-available) : bytes.slice(0, available));
+        chunks.push({ ...chunk, text: newest ? marker + body : body + marker });
+      }
+      truncated = true;
+      break;
+    }
+    chunks.push(chunk);
+    usedBytes += bytes.length;
+  }
+  if (newest) chunks.reverse();
+  return { chunks, truncated };
+}
+export const getAgentSnapshot = (sessionId: string): AgentSnapshot => {
+  const { chunks, truncated } = previewMockChunks(CHUNKS[sessionId] || [], true);
+  return {
+    session: SESSIONS.find((x) => x.id === sessionId)!, chunks, truncated,
+    firstSeq: chunks[0]?.seq ?? null, lastSeq: chunks[chunks.length - 1]?.seq ?? null,
+  };
+};
+export const listTerminalChunks = (sessionId: string, afterSeq = 0) =>
+  previewMockChunks((CHUNKS[sessionId] || []).filter((chunk) => chunk.seq > afterSeq), false).chunks;
 export const listWorkspaceLocks = () => [];
 export const buildStartupContext = (a: any) => ({
   task: getTask(a.taskId),

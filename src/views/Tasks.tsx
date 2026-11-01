@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ClipboardCopy, FileDown, Flag, Plus, Save } from "lucide-react";
 import { useStore } from "../store";
 import { ipc } from "../lib/ipc";
@@ -20,40 +20,62 @@ import type { AgentSession, EventKind, FinalizeResult, Task, TaskEvent, TaskStat
 const STATUS_FILTERS: (TaskStatus | "all")[] = ["all", "in_progress", "blocked", "verified", "failed", "pending"];
 const EVENT_KINDS: EventKind[] = ["step", "error", "fix", "verification", "decision", "note"];
 
+// A task can be left and reopened while its mutation is pending. Keep one
+// backend request per task; updating that task's record never changes selection.
+const finalizingTasks = new Map<string, Promise<FinalizeResult>>();
+function finalizeTaskOnce(taskId: string): Promise<FinalizeResult> {
+  const existing = finalizingTasks.get(taskId);
+  if (existing) return existing;
+  const request = ipc.finalizeTask(taskId).then((result) => {
+    useStore.getState().upsertTask(result.task);
+    return result;
+  });
+  finalizingTasks.set(taskId, request);
+  const release = () => { if (finalizingTasks.get(taskId) === request) finalizingTasks.delete(taskId); };
+  void request.then(release, release);
+  return request;
+}
+
 export function Tasks() {
   const tasks = useStore((s) => s.tasks);
   const setTasks = useStore((s) => s.setTasks);
-  const upsertTask = useStore((s) => s.upsertTask);
+  const setView = useStore((s) => s.setView);
   const focusTaskId = useStore((s) => s.focusTaskId);
   const clearFocus = useStore((s) => s.clearFocus);
   const toast = useStore((s) => s.toast);
 
   const [filter, setFilter] = useState<TaskStatus | "all">("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
   const [finalizeResult, setFinalizeResult] = useState<FinalizeResult | null>(null);
 
-  const selected = useMemo(() => tasks.find((t) => t.id === selectedId) ?? null, [tasks, selectedId]);
   const shown = useMemo(
     () => (filter === "all" ? tasks : tasks.filter((t) => t.status === filter)),
     [tasks, filter],
   );
+  const selected = useMemo(() => shown.find((task) => task.id === selectedId) ?? shown[0] ?? null, [shown, selectedId]);
+  const selectedTaskRef = useRef(selected?.id);
+  selectedTaskRef.current = selected?.id;
 
   useEffect(() => {
-    ipc.listTasks({ limit: 200 }).then(setTasks).catch(() => toast("加载任务失败。", "error"));
+    let cancelled = false;
+    ipc.listTasks({ limit: 200 }).then((items) => { if (!cancelled) setTasks(items); })
+      .catch(() => { if (!cancelled) toast("加载任务失败。", "error"); });
+    return () => { cancelled = true; };
   }, [setTasks, toast]);
 
   // 尊重跨视图跳转的初始选中
   useEffect(() => {
     if (focusTaskId) {
+      setFilter("all");
       setSelectedId(focusTaskId);
+      setFinalizeResult(null);
       clearFocus();
     }
   }, [focusTaskId, clearFocus]);
 
   useEffect(() => {
-    if (!selectedId && shown[0]) setSelectedId(shown[0].id);
-  }, [shown, selectedId]);
+    setFinalizeResult(null);
+  }, [selected?.id]);
 
   return (
     <div>
@@ -67,7 +89,7 @@ export function Tasks() {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="font-mono text-[11px] tracking-kicker text-ink/45">TASKS · {shown.length}</h3>
-            <Button variant="primary" className="px-3 py-1.5 text-[12px]" onClick={() => setCreating(true)}>
+            <Button variant="primary" className="px-3 py-1.5 text-[12px]" onClick={() => setView("overview")}>
               <Plus className="h-3.5 w-3.5" /> 新建任务
             </Button>
           </div>
@@ -76,7 +98,8 @@ export function Tasks() {
             {STATUS_FILTERS.map((f) => (
               <button
                 key={f}
-                onClick={() => setFilter(f)}
+                onClick={() => { setFilter(f); setFinalizeResult(null); }}
+                aria-pressed={filter === f}
                 className={cx(
                   "rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] tracking-wide transition-colors",
                   filter === f
@@ -90,14 +113,15 @@ export function Tasks() {
           </div>
 
           <Panel className="divide-y divide-ink/[0.07]">
-            {shown.length === 0 && <div className="px-5 py-8 text-center text-[13px] text-ink/35">还没有任务</div>}
+            {shown.length === 0 && <div className="px-5 py-8 text-center text-[13px] text-ink/35">{filter === "all" ? "还没有任务" : "当前筛选没有任务"}</div>}
             {shown.map((t) => (
               <button
                 key={t.id}
-                onClick={() => setSelectedId(t.id)}
+                onClick={() => { setSelectedId(t.id); setFinalizeResult(null); }}
+                aria-pressed={selected?.id === t.id}
                 className={cx(
                   "flex w-full items-center gap-3 px-4 py-3 text-left transition-colors",
-                  selectedId === t.id ? "bg-ink/[0.03]" : "hover:bg-ink/[0.02]",
+                  selected?.id === t.id ? "bg-ink/[0.03]" : "hover:bg-ink/[0.02]",
                 )}
               >
                 <span className="font-mono text-[10.5px] text-ink/30">{t.id.slice(0, 6)}</span>
@@ -114,27 +138,17 @@ export function Tasks() {
             <Empty className="py-20">选择左侧一个任务查看其证据链</Empty>
           ) : (
             <TaskDetail
+              key={selected.id}
               task={selected}
               onFinalized={(r) => {
-                upsertTask(r.task);
-                setFinalizeResult(r);
+                if (selectedTaskRef.current === r.task.id) setFinalizeResult(r);
               }}
             />
           )}
         </div>
       </div>
 
-      {creating && (
-        <CreateTaskModal
-          onClose={() => setCreating(false)}
-          onCreated={(t) => {
-            upsertTask(t);
-            setSelectedId(t.id);
-            setCreating(false);
-          }}
-        />
-      )}
-      {finalizeResult && <FinalizeModal result={finalizeResult} onClose={() => setFinalizeResult(null)} />}
+      {finalizeResult && finalizeResult.task.id === selected?.id && <FinalizeModal result={finalizeResult} onClose={() => setFinalizeResult(null)} />}
     </div>
   );
 }
@@ -145,50 +159,102 @@ function TaskDetail({ task, onFinalized }: { task: Task; onFinalized: (r: Finali
   const toast = useStore((s) => s.toast);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [sessions, setSessions] = useState<AgentSession[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(() => finalizingTasks.has(task.id));
+  const [exporting, setExporting] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const mountedRef = useRef(false);
+  const lifecycleRef = useRef(0);
+  const refreshRequestRef = useRef(0);
+  const finalizingRef = useRef(false);
+  const exportingRef = useRef(false);
+  const copyingRef = useRef(false);
+  const onFinalizedRef = useRef(onFinalized);
+  onFinalizedRef.current = onFinalized;
 
-  const refresh = () => {
+  const refresh = useCallback(async () => {
+    const request = ++refreshRequestRef.current;
+    const lifecycle = lifecycleRef.current;
+    if (!mountedRef.current) return;
     setLoading(true);
-    ipc
-      .listEvents(task.id)
-      .then((e) => setEvents([...e].sort((a, b) => a.seq - b.seq)))
-      .catch(() => toast("加载证据链失败。", "error"))
-      .finally(() => setLoading(false));
-    ipc.listAgentSessions({ taskId: task.id }).then(setSessions).catch(() => {});
-  };
+    const [eventResult, sessionResult] = await Promise.allSettled([
+      ipc.listEvents(task.id), ipc.listAgentSessions({ taskId: task.id }),
+    ]);
+    if (!mountedRef.current || lifecycle !== lifecycleRef.current || request !== refreshRequestRef.current) return;
+    if (eventResult.status === "fulfilled") setEvents([...eventResult.value].sort((a, b) => a.seq - b.seq));
+    else { setEvents([]); toast("加载证据链失败。", "error"); }
+    if (sessionResult.status === "fulfilled") setSessions(sessionResult.value);
+    else { setSessions([]); toast("加载关联会话失败。", "error"); }
+    setLoading(false);
+  }, [task.id, toast]);
 
-  useEffect(refresh, [task.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const finalize = async () => {
+  const observeFinalize = useCallback(async (request: Promise<FinalizeResult>) => {
+    const lifecycle = lifecycleRef.current;
+    finalizingRef.current = true;
     setBusy(true);
     try {
-      const r = await ipc.finalizeTask(task.id);
-      onFinalized(r);
+      const result = await request;
+      if (!mountedRef.current || lifecycle !== lifecycleRef.current) return;
+      onFinalizedRef.current(result);
+      void refresh();
       toast("任务已收尾,已沉淀经验。", "success");
     } catch {
-      toast("收尾失败。", "error");
+      if (mountedRef.current && lifecycle === lifecycleRef.current) toast("收尾失败。", "error");
     } finally {
-      setBusy(false);
+      if (mountedRef.current && lifecycle === lifecycleRef.current) {
+        finalizingRef.current = false;
+        setBusy(false);
+      }
     }
+  }, [refresh, toast]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    lifecycleRef.current += 1;
+    void refresh();
+    const existing = finalizingTasks.get(task.id);
+    if (existing) void observeFinalize(existing);
+    return () => {
+      mountedRef.current = false;
+      lifecycleRef.current += 1;
+      refreshRequestRef.current += 1;
+    };
+  }, [task.id, refresh, observeFinalize]);
+
+  const finalize = () => {
+    if (finalizingRef.current) return;
+    void observeFinalize(finalizeTaskOnce(task.id));
   };
 
   const exportBrief = async () => {
+    if (exportingRef.current) return;
+    exportingRef.current = true;
+    setExporting(true);
     try {
       const { path } = await ipc.exportBrief(task.id);
-      toast(`Brief 已导出:${path}`, "success");
+      if (mountedRef.current) toast(`Brief 已导出:${path}`, "success");
     } catch {
-      toast("导出 Brief 失败。", "error");
+      if (mountedRef.current) toast("导出 Brief 失败。", "error");
+    } finally {
+      exportingRef.current = false;
+      if (mountedRef.current) setExporting(false);
     }
   };
 
   const copyTrailer = async () => {
+    if (copyingRef.current) return;
+    copyingRef.current = true;
+    setCopying(true);
     try {
       const { trailer } = await ipc.generateCommitTrailer(task.id);
+      if (!mountedRef.current) return;
       await navigator.clipboard.writeText(trailer);
-      toast(`已复制 commit trailer:${trailer}`, "success");
+      if (mountedRef.current) toast(`已复制 commit trailer:${trailer}`, "success");
     } catch {
-      toast("复制 trailer 失败。", "error");
+      if (mountedRef.current) toast("复制 trailer 失败。", "error");
+    } finally {
+      copyingRef.current = false;
+      if (mountedRef.current) setCopying(false);
     }
   };
 
@@ -223,10 +289,10 @@ function TaskDetail({ task, onFinalized }: { task: Task; onFinalized: (r: Finali
           <Button variant="primary" className="px-3.5 py-1.5 text-[12px]" onClick={finalize} disabled={busy}>
             {busy ? <Spinner /> : <Flag className="h-3.5 w-3.5" />} 收尾任务
           </Button>
-          <Button variant="ghost" className="px-3.5 py-1.5 text-[12px]" onClick={exportBrief}>
+          <Button variant="ghost" className="px-3.5 py-1.5 text-[12px]" onClick={exportBrief} disabled={exporting}>
             <FileDown className="h-3.5 w-3.5" /> 导出 Brief
           </Button>
-          <Button variant="ghost" className="px-3.5 py-1.5 text-[12px]" onClick={copyTrailer}>
+          <Button variant="ghost" className="px-3.5 py-1.5 text-[12px]" onClick={copyTrailer} disabled={copying}>
             <ClipboardCopy className="h-3.5 w-3.5" /> 复制 trailer
           </Button>
         </div>
@@ -239,7 +305,7 @@ function TaskDetail({ task, onFinalized }: { task: Task; onFinalized: (r: Finali
       <Panel className="p-4">
         <h3 className="mb-3 font-mono text-[11px] tracking-kicker text-ink/45">SESSIONS · 关联会话</h3>
         {sessions.length === 0 ? (
-          <p className="py-3 text-center text-[12px] text-ink/35">此任务尚无 Agent 会话</p>
+          <p className="py-3 text-center text-[12px] text-ink/35">{loading ? "正在加载关联会话…" : "此任务尚无 Agent 会话"}</p>
         ) : (
           <div className="space-y-1.5">
             {sessions.map((s) => (
@@ -262,7 +328,7 @@ function TaskDetail({ task, onFinalized }: { task: Task; onFinalized: (r: Finali
           {loading && <Spinner />}
         </div>
         {events.length === 0 ? (
-          <Empty>还没有证据。启动 Agent 或手动追加一条。</Empty>
+          <Empty>{loading ? "正在加载证据链…" : "还没有证据。启动 Agent 或手动追加一条。"}</Empty>
         ) : (
           <ol className="relative space-y-4 border-l border-ink/10 pl-5">
             {events.map((ev) => (
@@ -316,9 +382,18 @@ function AppendEvidence({ taskId, onAppended }: { taskId: string; onAppended: ()
   const [summary, setSummary] = useState("");
   const [detail, setDetail] = useState("");
   const [saving, setSaving] = useState(false);
+  const mountedRef = useRef(false);
+  const savingRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const save = async () => {
+    if (savingRef.current) return;
     if (!summary.trim()) return toast("请填写摘要。", "warning");
+    savingRef.current = true;
     setSaving(true);
     try {
       await ipc.appendEvent({
@@ -328,15 +403,17 @@ function AppendEvidence({ taskId, onAppended }: { taskId: string; onAppended: ()
         detail: detail.trim() || undefined,
         actor: "human",
       });
+      if (!mountedRef.current) return;
       setSummary("");
       setDetail("");
       setKind("note");
       onAppended();
       toast("证据已入链。", "success");
     } catch {
-      toast("追加证据失败。", "error");
+      if (mountedRef.current) toast("追加证据失败。", "error");
     } finally {
-      setSaving(false);
+      savingRef.current = false;
+      if (mountedRef.current) setSaving(false);
     }
   };
 
@@ -377,72 +454,6 @@ function AppendEvidence({ taskId, onAppended }: { taskId: string; onAppended: ()
         </Button>
       </div>
     </Panel>
-  );
-}
-
-// ── 新建任务 Modal ───────────────────────────────────────────────
-
-function CreateTaskModal({ onClose, onCreated }: { onClose: () => void; onCreated: (t: Task) => void }) {
-  const toast = useStore((s) => s.toast);
-  const [title, setTitle] = useState("");
-  const [goal, setGoal] = useState("");
-  const [tags, setTags] = useState("");
-  const [repoPath, setRepoPath] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  const submit = async () => {
-    if (!title.trim() || !goal.trim()) return toast("标题与目标必填。", "warning");
-    setSaving(true);
-    try {
-      const t = await ipc.createTask({
-        title: title.trim(),
-        goal: goal.trim(),
-        repoPath: repoPath.trim() || undefined,
-        tags: tags
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-      });
-      onCreated(t);
-      toast("任务已创建。", "success");
-    } catch {
-      toast("创建任务失败。", "error");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Modal title="新建任务" onClose={onClose}>
-      <div className="space-y-4">
-        <Field label="标题">
-          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="简明的任务名" className={inputCls} />
-        </Field>
-        <Field label="目标 Goal" hint="要达成什么、验收标准是什么">
-          <textarea
-            value={goal}
-            onChange={(e) => setGoal(e.target.value)}
-            rows={3}
-            placeholder="描述目标与验收口径"
-            className={cx(inputCls, "resize-none")}
-          />
-        </Field>
-        <Field label="标签" hint="逗号分隔,如 refactor, auth">
-          <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="tag1, tag2" className={inputCls} />
-        </Field>
-        <Field label="仓库路径(可选)">
-          <input value={repoPath} onChange={(e) => setRepoPath(e.target.value)} placeholder="D:/repo" className={inputCls} />
-        </Field>
-        <div className="flex justify-end gap-2 border-t border-ink/[0.07] pt-4">
-          <Button variant="subtle" onClick={onClose}>
-            取消
-          </Button>
-          <Button variant="primary" onClick={submit} disabled={saving}>
-            {saving ? <Spinner /> : <Plus className="h-4 w-4" />} 创建
-          </Button>
-        </div>
-      </div>
-    </Modal>
   );
 }
 

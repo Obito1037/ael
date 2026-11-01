@@ -1,28 +1,26 @@
 import { useState } from "react";
-import { BookOpenText, FileCheck2, Fingerprint, ListChecks } from "lucide-react";
+import { BookOpenText, FileCheck2, Fingerprint } from "lucide-react";
 import { cx } from "../lib/format";
-import { Tasks } from "./Tasks";
 import { Briefs } from "./Briefs";
 import { Blame } from "./Blame";
 import { Adr } from "./Adr";
 
-type EvidenceTab = "chain" | "review" | "blame" | "decisions";
+type EvidenceTab = "review" | "blame" | "decisions";
 
-const TABS: Array<{ id: EvidenceTab; label: string; icon: typeof ListChecks }> = [
-  { id: "chain", label: "任务与证据", icon: ListChecks },
+const TABS: Array<{ id: EvidenceTab; label: string; icon: typeof FileCheck2 }> = [
   { id: "review", label: "Review Brief", icon: FileCheck2 },
   { id: "blame", label: "来源链", icon: Fingerprint },
   { id: "decisions", label: "决策记录", icon: BookOpenText },
 ];
 
 /**
- * Evidence is the compact shell for the former task/review/blame/ADR pages.
+ * Evidence groups review/blame/ADR; task management has its own single entry.
  * The existing feature views remain reusable and their visual language is not
  * duplicated or changed; this shell only gives them one coherent entry point.
  */
 export function Evidence() {
-  const [tab, setTab] = useState<EvidenceTab>("chain");
-  const Active = tab === "chain" ? Tasks : tab === "review" ? Briefs : tab === "blame" ? Blame : Adr;
+  const [tab, setTab] = useState<EvidenceTab>("review");
+  const Active = tab === "review" ? Briefs : tab === "blame" ? Blame : Adr;
 
   return (
     <div>

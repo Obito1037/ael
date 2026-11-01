@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArchiveRestore,
   Check,
@@ -22,6 +22,11 @@ import type { AgentRecommendation, Failure, FailureCandidate, HistoryConversatio
 
 type MemoryTab = "library" | "inbox" | "health" | "routing" | "history";
 type LibraryFilter = "all" | "active" | "needs_revalidation" | "deprecated";
+const HISTORY_PAGE_SIZE = 30;
+function historyErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
+  return fallback;
+}
 
 const TABS: { id: MemoryTab; label: string; icon: typeof Library }[] = [
   { id: "library", label: "记忆库", icon: Library },
@@ -98,12 +103,29 @@ export function Memory() {
   const [historyConversations, setHistoryConversations] = useState<HistoryConversation[]>([]);
   const [historyMessages, setHistoryMessages] = useState<HistoryMessage[]>([]);
   const [historySelection, setHistorySelection] = useState<string | null>(null);
-  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyBusy, setHistoryBusy] = useState(() => Boolean(ipc.activeHistoryJob()));
+  const [historyOffset, setHistoryOffset] = useState(0);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(() => ipc.lastHistoryJobError());
+  const [historyVersion, setHistoryVersion] = useState(0);
   const [skillCandidates, setSkillCandidates] = useState<SkillCandidate[]>([]);
   const [failureCandidates, setFailureCandidates] = useState<FailureCandidate[]>([]);
   const [candidateBusyId, setCandidateBusyId] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const historyRequestRef = useRef(0);
+  const libraryRequestRef = useRef(0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      historyRequestRef.current += 1;
+      libraryRequestRef.current += 1;
+    };
+  }, []);
 
   const loadHistory = async () => {
+    const request = ++historyRequestRef.current;
     try {
       const [summary, conversations, nextSkillCandidates, nextFailureCandidates] = await Promise.all([
         ipc.getHistoryScanSummary(),
@@ -111,53 +133,81 @@ export function Memory() {
         ipc.listSkillCandidates(),
         ipc.listFailureCandidates(),
       ]);
+      if (!mountedRef.current || request !== historyRequestRef.current) return;
       setHistorySummary(summary);
       setHistoryConversations(conversations);
-      setHistorySelection((current) => current || conversations[0]?.id || null);
+      setHistorySelection((current) => conversations.some((item) => item.id === current) ? current : conversations[0]?.id || null);
       setSkillCandidates(nextSkillCandidates);
       setFailureCandidates(nextFailureCandidates);
-    } catch {
-      toast("历史索引加载失败。", "error");
+      setHistoryVersion((version) => version + 1);
+    } catch (error) {
+      if (!mountedRef.current || request !== historyRequestRef.current) return;
+      setHistoryError(historyErrorMessage(error, "历史索引加载失败。"));
     }
   };
 
-  const runHistoryScan = async () => {
+  useEffect(() => {
+    const job = ipc.activeHistoryJob();
+    if (!job) return;
+    let cancelled = false;
     setHistoryBusy(true);
+    void job.promise.then(() => {
+      if (!cancelled) void loadHistory();
+    }).catch((error: unknown) => {
+      if (!cancelled) setHistoryError(historyErrorMessage(error, "后台历史处理失败。"));
+    }).finally(() => {
+      if (!cancelled) setHistoryBusy(false);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const runHistoryScan = async () => {
+    if (ipc.activeHistoryJob()) return;
+    setHistoryBusy(true);
+    setHistoryError(null);
     try {
       const summary = await ipc.scanHistory();
+      if (!mountedRef.current) return;
       setHistorySummary(summary);
       await loadHistory();
-      toast(`扫描完成：${summary.conversations} 个会话、${summary.messages} 条消息。`, "success");
-    } catch {
-      toast("历史扫描失败，请查看运行日志。", "error");
+      const skipped = Object.values(summary.sourceCounts).some((source) => (source.skippedFiles ?? 0) > 0 || (source.skippedLines ?? 0) > 0);
+      toast(`${skipped ? "扫描完成，部分记录未索引" : "扫描完成"}：${summary.conversations} 个会话、${summary.messages} 条消息。`, skipped ? "warning" : "success");
+    } catch (error) {
+      if (mountedRef.current) setHistoryError(historyErrorMessage(error, "历史扫描失败，已有索引仍保留。"));
     } finally {
-      setHistoryBusy(false);
+      if (mountedRef.current) setHistoryBusy(false);
     }
   };
 
   const extractCandidates = async () => {
+    if (ipc.activeHistoryJob()) return;
     setHistoryBusy(true);
+    setHistoryError(null);
     try {
       const result = await ipc.extractHistoryCandidates();
+      if (!mountedRef.current) return;
       await loadHistory();
       toast(`提炼完成：${result.skillCandidates} 条技能候选、${result.failureCandidates} 条失败候选；仍需人工审阅。`, "success");
-    } catch {
-      toast("候选提炼失败。", "error");
+    } catch (error) {
+      if (mountedRef.current) setHistoryError(historyErrorMessage(error, "候选提炼失败。"));
     } finally {
-      setHistoryBusy(false);
+      if (mountedRef.current) setHistoryBusy(false);
     }
   };
 
   const distillCandidates = async () => {
+    if (ipc.activeHistoryJob()) return;
     setHistoryBusy(true);
+    setHistoryError(null);
     try {
       const result = await ipc.distillHistoryCandidates({ profileId: "codex" });
+      if (!mountedRef.current) return;
       await loadHistory();
       toast(`ACP 提炼完成：${result.skillCandidates} 条技能候选、${result.failureCandidates} 条失败候选；仍需人工审阅。`, "success");
     } catch (error) {
-      toast(error instanceof Error ? error.message : "ACP 提炼失败，请确认本机 Agent 已登录。", "error");
+      if (mountedRef.current) setHistoryError(historyErrorMessage(error, "ACP 提炼失败，请确认本机 Agent 已登录。"));
     } finally {
-      setHistoryBusy(false);
+      if (mountedRef.current) setHistoryBusy(false);
     }
   };
 
@@ -198,15 +248,18 @@ export function Memory() {
   };
 
   const load = async () => {
+    const request = ++libraryRequestRef.current;
     try {
       const [nextSkills, nextFailures] = await Promise.all([
         ipc.listSkills({ limit: 300 }),
         ipc.listFailures({ limit: 300 }),
       ]);
+      if (!mountedRef.current || request !== libraryRequestRef.current) return;
       setSkills(nextSkills);
       setFailures(nextFailures);
       setSelectedId((current) => current || nextSkills[0]?.id || null);
     } catch {
+      if (!mountedRef.current || request !== libraryRequestRef.current) return;
       toast("记忆库加载失败。", "error");
     }
   };
@@ -221,12 +274,25 @@ export function Memory() {
   }, [tab]);
 
   useEffect(() => {
+    let cancelled = false;
+    setHistoryMessages([]);
     if (!historySelection) {
-      setHistoryMessages([]);
+      setHistoryLoading(false);
       return;
     }
-    ipc.listHistoryMessages(historySelection).then(setHistoryMessages).catch(() => setHistoryMessages([]));
-  }, [historySelection]);
+    setHistoryLoading(true);
+    ipc.listHistoryMessages(historySelection, { limit: HISTORY_PAGE_SIZE, offset: historyOffset })
+      .then((messages) => { if (!cancelled) setHistoryMessages(messages); })
+      .catch((error: unknown) => {
+        if (!cancelled) setHistoryError(historyErrorMessage(error, "消息预览加载失败。"));
+      }).finally(() => { if (!cancelled) setHistoryLoading(false); });
+    return () => { cancelled = true; };
+  }, [historySelection, historyOffset, historyVersion]);
+
+  const historyTotal = historyConversations.find((item) => item.id === historySelection)?.messageCount ?? 0;
+  const historySources = Object.values(historySummary?.sourceCounts ?? {});
+  const skippedHistoryFiles = historySources.reduce((sum, source) => sum + (source.skippedFiles ?? 0), 0);
+  const skippedHistoryLines = historySources.reduce((sum, source) => sum + (source.skippedLines ?? 0), 0);
 
   const drafts = useMemo(() => skills.filter((skill) => skill.status === "draft"), [skills]);
   const active = useMemo(() => skills.filter((skill) => skill.status === "active"), [skills]);
@@ -587,10 +653,20 @@ export function Memory() {
               </Button>
               <Button variant="primary" onClick={runHistoryScan} disabled={historyBusy}>
                 {historyBusy ? <Spinner /> : <ScanSearch className="h-3.5 w-3.5" />}
-                {historyBusy ? "正在扫描…" : "扫描本机历史"}
+                {historyBusy ? "后台处理中…" : "扫描本机历史"}
               </Button>
             </div>
           </div>
+
+          {historyBusy && <p role="status" className="mb-4 text-[12px] text-ink/60">正在后台处理历史；可以切换页面，返回后将继续显示结果。请勿重复启动。</p>}
+          {historyError && <div role="alert" className="mb-4 rounded-xl border border-red/20 bg-red/5 p-4 text-[12px] text-red">{historyError}</div>}
+          {(skippedHistoryFiles > 0 || skippedHistoryLines > 0) && (
+            <details className="mb-4 rounded-xl border border-orange/25 bg-orange/5 p-4 text-[12px] text-ink/70">
+              <summary className="cursor-pointer font-medium">部分记录未索引：跳过 {skippedHistoryFiles} 个文件 / 表、{skippedHistoryLines} 行记录</summary>
+              <p className="mt-2">源文件未修改。超限文件保留原有索引；无效或超过 4 MiB 的单行不会进入本次索引。以下每个来源最多显示 20 条原因。</p>
+              <ul className="mt-2 space-y-1 break-all">{historySources.flatMap((source) => source.warnings ?? []).map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+            </details>
+          )}
 
           <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
             {[
@@ -620,7 +696,7 @@ export function Memory() {
                     <button
                       type="button"
                       key={conversation.id}
-                      onClick={() => setHistorySelection(conversation.id)}
+                      onClick={() => { setHistorySelection(conversation.id); setHistoryOffset(0); setHistoryError(null); }}
                       className={cx("w-full px-5 py-4 text-left hover:bg-panel2/42", historySelection === conversation.id && "bg-panel2/72")}
                     >
                       <div className="flex items-start gap-3">
@@ -643,10 +719,12 @@ export function Memory() {
             <Panel className="overflow-hidden">
               <div className="border-b border-line bg-panel2/42 px-5 py-3">
                 <h3 className="font-serif text-[18px]">消息预览</h3>
-                <p className="mt-1 text-[10.5px] text-ink/38">用于人工检查归一化是否正确，不自动生成或启用 Skill。</p>
+                <p className="mt-1 text-[10.5px] text-ink/38">每页 {HISTORY_PAGE_SIZE} 条，每条预览最多 4000 字；完整内容保留在本机索引。不自动启用 Skill。</p>
               </div>
               {!historySelection ? (
                 <Empty className="m-5">选择一个会话查看。</Empty>
+              ) : historyLoading ? (
+                <div role="status" className="flex items-center gap-2 p-5 text-[12px] text-ink/50"><Spinner />加载消息预览…</div>
               ) : historyMessages.length === 0 ? (
                 <Empty className="m-5">该会话没有可展示的文本消息。</Empty>
               ) : (
@@ -660,6 +738,13 @@ export function Memory() {
                       <p className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-ink/62">{message.text}</p>
                     </div>
                   ))}
+                </div>
+              )}
+              {historySelection && historyTotal > 0 && (
+                <div className="flex items-center justify-between gap-2 border-t border-line px-4 py-3">
+                  <Button variant="ghost" disabled={historyLoading || historyOffset === 0} onClick={() => setHistoryOffset((offset) => Math.max(0, offset - HISTORY_PAGE_SIZE))}>上一页</Button>
+                  <span className="text-[10.5px] text-ink/45">{historyOffset + 1}–{Math.min(historyOffset + HISTORY_PAGE_SIZE, historyTotal)} / {historyTotal} 条</span>
+                  <Button variant="ghost" disabled={historyLoading || historyOffset + HISTORY_PAGE_SIZE >= historyTotal} onClick={() => setHistoryOffset((offset) => offset + HISTORY_PAGE_SIZE)}>下一页</Button>
                 </div>
               )}
             </Panel>
