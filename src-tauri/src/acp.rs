@@ -57,7 +57,7 @@ const ACP_PERMISSION_RULE: &str = "acp.permission";
 fn permission_subject(tool_call: &Value) -> String {
     let command = tool_call.pointer("/rawInput/command");
     if let Some(text) = command.and_then(Value::as_str) {
-        return text.to_string();
+        return compact_executable(text);
     }
     if let Some(parts) = command.and_then(Value::as_array) {
         return parts
@@ -76,6 +76,19 @@ fn permission_subject(tool_call: &Value) -> String {
     } else {
         format!("{title}: {}", paths.join(", "))
     }
+}
+
+/// 去掉开头可执行文件的完整路径。界面只显示一行，长路径会把真正的命令挤出视野，
+/// 让人无法判断要不要放行。
+fn compact_executable(command: &str) -> String {
+    let Some(rest) = command.strip_prefix('"') else {
+        return command.to_string();
+    };
+    let Some((executable, arguments)) = rest.split_once('"') else {
+        return command.to_string();
+    };
+    let name = executable.rsplit(['\\', '/']).next().unwrap_or(executable);
+    format!("{name}{arguments}")
 }
 
 fn permission_paths(tool_call: &Value) -> Vec<&str> {
@@ -1238,6 +1251,15 @@ mod tests {
         let subject = permission_subject(&tool_call);
         assert!(subject.contains("Remove-Item -Recurse -Force victim"));
         assert!(!subject.contains('{'));
+    }
+
+    #[test]
+    fn long_executable_paths_do_not_hide_the_command() {
+        assert_eq!(
+            compact_executable(r#""C:\Windows\powershell.exe" -Command "rm x""#),
+            r#"powershell.exe -Command "rm x""#
+        );
+        assert_eq!(compact_executable("git status"), "git status");
     }
 
     #[test]
