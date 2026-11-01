@@ -71,6 +71,12 @@ pub async fn start_agent_session(
             "ACP 通道需要可用的 npx；请安装 Node.js，或选择 PTY 回退",
         ));
     }
+    let (args, initial_prompt) = if profile_id == "codex" {
+        let model = state.settings_snapshot().codex_model;
+        codex_pty_launch(args, initial_prompt, &model)
+    } else {
+        (args, initial_prompt)
+    };
     state.agents.start_session(
         app,
         &state.db,
@@ -87,6 +93,38 @@ pub async fn start_agent_session(
             lock_workspace,
         },
     )
+}
+
+/// Codex 的 TUI 启动较慢，写进 PTY 的提示词会在界面就绪前丢失，
+/// 所以把它作为命令行参数传入。
+fn codex_pty_launch(
+    args: Option<Vec<String>>,
+    prompt: Option<String>,
+    model: &str,
+) -> (Option<Vec<String>>, Option<String>) {
+    let mut launch = args.unwrap_or_default();
+    if !model.is_empty() {
+        launch.extend(["-m".to_string(), model.to_string()]);
+    }
+    launch.extend(prompt);
+    ((!launch.is_empty()).then_some(launch), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::codex_pty_launch;
+
+    #[test]
+    fn codex_pty_receives_model_and_prompt_as_arguments() {
+        let (args, prompt) = codex_pty_launch(None, Some("hello".into()), "luna");
+        assert_eq!(args.unwrap(), ["-m", "luna", "hello"]);
+        assert_eq!(prompt, None);
+    }
+
+    #[test]
+    fn codex_pty_without_model_or_prompt_adds_nothing() {
+        assert_eq!(codex_pty_launch(None, None, ""), (None, None));
+    }
 }
 
 #[tauri::command]
