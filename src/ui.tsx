@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ButtonHTMLAttributes, type ElementType, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { cx } from "./lib/format";
 
@@ -29,7 +29,7 @@ export function Panel({
 }: {
   children: ReactNode;
   className?: string;
-  as?: any;
+  as?: ElementType;
 }) {
   return (
     <As

@@ -39,7 +39,6 @@ export function Adr() {
 
   useEffect(() => {
     load(filter);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
 
   const selectedTask: Task | undefined = useMemo(

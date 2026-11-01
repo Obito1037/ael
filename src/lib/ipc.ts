@@ -46,7 +46,7 @@ import type {
 
 export const isTauri = () =>
   typeof window !== "undefined" &&
-  (window as any).__TAURI_INTERNALS__ !== undefined;
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== undefined;
 
 /** 在 Tauri 里走真实 invoke;浏览器预览走内存 mock。 */
 const IPC_TIMEOUT_MS = 30_000;
@@ -271,7 +271,7 @@ export const ipc = {
     includeSkills?: boolean;
     includeHandover?: boolean;
     tokenBudget?: number;
-  }) => call<any>("build_agent_startup_context", a, () => mock.buildStartupContext(a)),
+  }) => call<{ prompt: string; [key: string]: unknown }>("build_agent_startup_context", a, () => mock.buildStartupContext(a)),
 
   // ── 本机历史索引 ─────────────────────────────────────
   activeHistoryJob: () => activeHistoryJob,

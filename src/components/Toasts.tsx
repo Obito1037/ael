@@ -1,9 +1,9 @@
-import { AlertTriangle, CheckCircle2, Info, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Info, XCircle, type LucideIcon } from "lucide-react";
 import { useStore } from "../store";
 import { cx } from "../lib/format";
 import type { ToastKind } from "../types";
 
-const icon: Record<ToastKind, any> = {
+const icon: Record<ToastKind, LucideIcon> = {
   info: Info,
   success: CheckCircle2,
   warning: AlertTriangle,

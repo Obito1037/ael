@@ -79,7 +79,6 @@ export function Blame() {
 
   useEffect(() => {
     if (ledgerTaskId) loadLinks(ledgerTaskId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ledgerTaskId]);
 
   const scan = async () => {
