@@ -31,8 +31,10 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 const TERMINAL_CHUNK_EVENT: &str = "agent://terminal-chunk";
@@ -40,6 +42,13 @@ const SESSION_STATUS_EVENT: &str = "agent://session-status";
 const PARSED_EVENT_EVENT: &str = "agent://parsed-event";
 const GATE_PENDING_EVENT: &str = "gate://pending";
 const GATE_DECISION_EVENT: &str = "gate://decision";
+
+// 适配器锁定版本：@latest 会让同一安装包在不同日期拉到不同依赖，出错后也无法复现。
+const CODEX_ACP_PACKAGE: &str = "@agentclientprotocol/codex-acp@2.5.0";
+const CLAUDE_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.99.1";
+
+/// 等待 ACP 握手的上限。首次运行要下载适配器，超时后保留会话继续等待，不回退。
+const ACP_READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn acp_args(profile_id: &str) -> Vec<&'static str> {
     match profile_id {
@@ -54,18 +63,63 @@ fn acp_args(profile_id: &str) -> Vec<&'static str> {
         "claude_code" => vec![
             if cfg!(windows) { "npx.cmd" } else { "npx" },
             "-y",
-            "@agentclientprotocol/claude-agent-acp@latest",
+            CLAUDE_ACP_PACKAGE,
         ],
         _ => vec![
             if cfg!(windows) { "npx.cmd" } else { "npx" },
             "-y",
-            "@agentclientprotocol/codex-acp@latest",
+            CODEX_ACP_PACKAGE,
         ],
     }
 }
 
 fn command_line_for(profile_id: &str) -> String {
     acp_args(profile_id).join(" ")
+}
+
+/// 启动参数。Codex 优先用本机已登录的 CLI，而不是适配器自带的平台包，
+/// 后者依赖 npm 可选依赖，在 npx 缓存里可能缺失。
+fn spawn_args(profile_id: &str, local_codex: Option<PathBuf>) -> Vec<String> {
+    let mut args = Vec::new();
+    if profile_id == "codex" {
+        if let Some(path) = local_codex {
+            args.push(format!("CODEX_PATH={}", path.display()));
+        }
+    }
+    args.extend(acp_args(profile_id).into_iter().map(str::to_owned));
+    args
+}
+
+fn agent_for(profile_id: &str) -> Result<AcpAgent, agent_client_protocol::Error> {
+    let local_codex = (profile_id == "codex")
+        .then(|| crate::agent::resolve_executable("codex"))
+        .flatten();
+    AcpAgent::from_args(spawn_args(profile_id, local_codex))
+        .map_err(|error| agent_client_protocol::util::internal_error(error.to_string()))
+}
+
+type ReadySender = Arc<Mutex<Option<oneshot::Sender<Result<(), String>>>>>;
+
+fn notify_ready(ready: &ReadySender, result: Result<(), String>) {
+    if let Some(sender) = ready.lock().expect("ACP ready mutex poisoned").take() {
+        let _ = sender.send(result);
+    }
+}
+
+/// 启动结果的等待句柄。
+pub struct AcpStart {
+    pub session: AgentSession,
+    ready: oneshot::Receiver<Result<(), String>>,
+}
+
+impl AcpStart {
+    /// 握手失败时返回错误原因，调用方据此回退到 PTY。
+    pub async fn wait_ready(self) -> Result<AgentSession, String> {
+        match tokio::time::timeout(ACP_READY_TIMEOUT, self.ready).await {
+            Ok(Ok(Err(reason))) => Err(reason),
+            _ => Ok(self.session),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -313,7 +367,7 @@ impl AcpRuntime {
         cwd: Option<String>,
         initial_prompt: Option<String>,
         lock_workspace: Option<bool>,
-    ) -> AelResult<AgentSession> {
+    ) -> AelResult<AcpStart> {
         if !Self::supports(&profile_id) {
             return Err(AelError::invalid_input(format!(
                 "profile {profile_id} 暂不支持 ACP"
@@ -326,7 +380,7 @@ impl AcpRuntime {
                 cwd.display()
             )));
         }
-        let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+        let cwd = crate::util::canonical_working_dir(&cwd);
         let now = now_iso();
         let id = Uuid::new_v4().to_string();
         let command_line = command_line_for(&profile_id);
@@ -357,6 +411,8 @@ impl AcpRuntime {
         }
         let (tx, rx) = mpsc::unbounded_channel();
         let stop_requested = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready) = oneshot::channel();
+        let ready_tx: ReadySender = Arc::new(Mutex::new(Some(ready_tx)));
         self.sessions
             .lock()
             .expect("ACP session mutex poisoned")
@@ -381,11 +437,9 @@ impl AcpRuntime {
             {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    mark_failed(
-                        &worker_app,
-                        &worker_id,
-                        format!("创建 ACP 运行时失败: {error}"),
-                    );
+                    let detail = format!("创建 ACP 运行时失败: {error}");
+                    mark_failed(&worker_app, &worker_id, detail.clone());
+                    notify_ready(&ready_tx, Err(detail));
                     return;
                 }
             };
@@ -398,6 +452,7 @@ impl AcpRuntime {
                 initial_prompt,
                 rx,
                 stop_requested,
+                ready_tx.clone(),
             ));
             match result {
                 Ok(AcpEnd::Stopped) => {
@@ -406,11 +461,15 @@ impl AcpRuntime {
                 Ok(AcpEnd::Exited) => {
                     mark_terminal(&worker_app, &worker_id, AgentSessionStatus::Exited)
                 }
-                Err(error) => mark_failed(&worker_app, &worker_id, error.to_string()),
+                Err(error) => {
+                    let detail = error.to_string();
+                    mark_failed(&worker_app, &worker_id, detail.clone());
+                    notify_ready(&ready_tx, Err(detail));
+                }
             }
         });
 
-        Ok(session)
+        Ok(AcpStart { session, ready })
     }
 
     pub fn send_input(
@@ -555,9 +614,7 @@ async fn run_json_prompt_async(
     cwd: PathBuf,
     prompt: String,
 ) -> Result<String, agent_client_protocol::Error> {
-    let args = acp_args(profile_id);
-    let agent = AcpAgent::from_args(args)
-        .map_err(|error| agent_client_protocol::util::internal_error(error.to_string()))?;
+    let agent = agent_for(profile_id)?;
     Client
         .builder()
         .name("ael3")
@@ -626,10 +683,9 @@ async fn run_connection(
     initial_prompt: Option<String>,
     mut rx: UnboundedReceiver<AcpCommand>,
     stop_requested: Arc<AtomicBool>,
+    ready: ReadySender,
 ) -> Result<AcpEnd, agent_client_protocol::Error> {
-    let args = acp_args(&profile_id);
-    let agent = AcpAgent::from_args(args)
-        .map_err(|error| agent_client_protocol::util::internal_error(error.to_string()))?;
+    let agent = agent_for(&profile_id)?;
     let permission_app = app.clone();
     let permission_session_id = session_id.clone();
     let permission_task_id = task_id.clone();
@@ -656,6 +712,7 @@ async fn run_connection(
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
             let mut session = cx.build_session(PathBuf::from(&cwd)).block_task().start_session().await?;
             mark_running(&app, &session_id);
+            notify_ready(&ready, Ok(()));
             let mut next_prompt = initial_prompt;
             let mut pending_prompts: VecDeque<String> = VecDeque::new();
             let evidence_pending = Arc::new(Mutex::new(String::new()));
@@ -865,11 +922,30 @@ fn mark_terminal(app: &AppHandle, session_id: &str, status: AgentSessionStatus) 
     let _ = state.db.release_workspace_locks_for_session(session_id);
 }
 
+/// SDK 的错误文本里混着 JSON 和本机源码路径；优先取出其中给人看的 message。
+fn readable_error(detail: &str) -> String {
+    detail
+        .find('{')
+        .and_then(|start| serde_json::from_str::<Value>(&detail[start..]).ok())
+        .and_then(|value| {
+            value
+                .pointer("/data/message")
+                .or_else(|| value.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| detail.to_string())
+}
+
 fn mark_failed(app: &AppHandle, session_id: &str, detail: String) {
     if let Some(state) = app.try_state::<crate::state::AppState>() {
         let _ = update_status(app, &state.db, session_id, AgentSessionStatus::Failed);
         let _ = state.db.release_workspace_locks_for_session(session_id);
-        emit_acp_output(app, session_id, format!("[ACP 错误] {detail}\r\n"));
+        emit_acp_output(
+            app,
+            session_id,
+            format!("[ACP 错误] {}\r\n", readable_error(&detail)),
+        );
     }
 }
 
@@ -911,4 +987,43 @@ fn update_status(
         },
     );
     Ok(session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readable_error_extracts_the_message_and_hides_local_paths() {
+        let detail = r#"Internal error: {"spawned_at":"C:\\Users\\x\\session.rs:1","data":{"message":"usage limit"}}"#;
+        assert_eq!(readable_error(detail), "usage limit");
+        assert_eq!(readable_error("process exited"), "process exited");
+    }
+
+    #[test]
+    fn adapters_are_pinned_to_exact_versions() {
+        for profile in ["codex", "claude_code"] {
+            let line = command_line_for(profile);
+            assert!(!line.contains("@latest"), "{line}");
+        }
+    }
+
+    #[test]
+    fn codex_uses_the_local_cli_when_one_is_found() {
+        let args = spawn_args("codex", Some(PathBuf::from("C:/Program Files/codex.exe")));
+        assert_eq!(args[0], "CODEX_PATH=C:/Program Files/codex.exe");
+        assert!(AcpAgent::from_args(args).is_ok());
+    }
+
+    #[test]
+    fn other_agents_ignore_the_local_codex_path() {
+        let args = spawn_args("gemini", Some(PathBuf::from("codex.exe")));
+        assert!(!args[0].starts_with("CODEX_PATH="));
+    }
+
+    #[test]
+    fn codex_without_a_local_cli_uses_the_adapter_dependency() {
+        let args = spawn_args("codex", None);
+        assert!(args[0].starts_with("npx"));
+    }
 }

@@ -25,10 +25,11 @@ pub fn detect_agents(state: State<AppState>) -> AelResult<Vec<AgentProfile>> {
     state.agents.detect_and_persist_profiles(&state.db)
 }
 
+// 异步命令：ACP 握手可能耗时数十秒，同步命令会卡住窗口主线程。
 #[tauri::command]
-pub fn start_agent_session(
+pub async fn start_agent_session(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     task_id: String,
     profile_id: String,
     cwd: Option<String>,
@@ -47,17 +48,25 @@ pub fn start_agent_session(
         && AcpRuntime::supports(&profile_id)
         && AcpRuntime::command_available_for(&profile_id)
     {
-        return state.acp.start_session(
-            app,
+        let start = state.acp.start_session(
+            app.clone(),
             &state.db,
-            task_id,
-            profile_id,
-            cwd,
-            initial_prompt,
+            task_id.clone(),
+            profile_id.clone(),
+            cwd.clone(),
+            initial_prompt.clone(),
             lock_workspace,
-        );
-    }
-    if runtime == "acp" {
+        )?;
+        match start.wait_ready().await {
+            // 握手期间状态已变；返回最新记录，避免前端用旧的 starting 覆盖 running。
+            Ok(session) => return state.db.get_agent_session(&session.id),
+            // 失败的 ACP 会话连同错误原因留在列表里；auto 模式继续走 PTY。
+            Err(reason) if runtime == "acp" => {
+                return Err(AelError::internal(format!("ACP 启动失败: {reason}")));
+            }
+            Err(_) => {}
+        }
+    } else if runtime == "acp" {
         return Err(AelError::not_found(
             "ACP 通道需要可用的 npx；请安装 Node.js，或选择 PTY 回退",
         ));
