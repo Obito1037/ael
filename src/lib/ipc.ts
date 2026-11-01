@@ -51,13 +51,16 @@ export const isTauri = () =>
 /** 在 Tauri 里走真实 invoke;浏览器预览走内存 mock。 */
 const IPC_TIMEOUT_MS = 30_000;
 
+// Starting an Agent waits for the ACP handshake (up to 120s in acp.rs), which downloads the adapter on first use.
+const LONG_RUNNING_IPC_MS: Record<string, number> = { start_agent_session: 150_000 };
+
 async function invokeWithTimeout<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       invoke<T>(cmd, args),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`IPC 调用超时: ${cmd}`)), IPC_TIMEOUT_MS);
+        timer = setTimeout(() => reject(new Error(`IPC 调用超时: ${cmd}`)), LONG_RUNNING_IPC_MS[cmd] ?? IPC_TIMEOUT_MS);
       }),
     ]);
   } finally {
