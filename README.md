@@ -79,7 +79,13 @@ pnpm dev   # 打开 http://localhost:1420
 
 面向使用者的安装、首个任务、Agent 运行、记忆沉淀、交接和故障排查步骤见 [`docs/AEL-使用说明.md`](docs/AEL-使用说明.md)。
 
-Codex / Claude Code 会在 `runtime=auto` 时优先尝试 ACP 结构化会话；需要 Node.js 的 `npx`。ACP 不可用时自动回退到原有 PTY，会话输入按回车提交，运行中的停止信号会优先中断读取并记录终态。首次使用 ACP 仍需按对应 Agent 的登录流程完成本机认证，不要求 AEL3 保存 API Key。
+Codex / Claude Code 会在 `runtime=auto` 时优先尝试 ACP 结构化会话；需要 Node.js 的 `npx`。ACP 不可用时自动回退到原有 PTY，会话输入按回车提交，运行中的停止信号会优先中断读取并记录终态。
+
+Codex 的 ACP 会话以 `read-only` 模式启动，写操作和不能证明只读的命令都要先申请权限，由海关按 `policy.toml` 裁决：未命中放行并留痕，`hold` 等人工，`deny` 直接拒绝，写到工作区之外一律等人工。模型在「设置 → Codex 模型」配置，默认 `gpt-5.6-luna`，留空则沿用 Codex 自己的配置。
+
+海关的边界：PTY 模式只能裁决从 AEL 输入的内容，Agent 在自身内部执行的命令要靠它自己的审批；Claude Code 和 Gemini 的 ACP 权限流程尚未用真实 Agent 验证。
+
+真实流程验证：`node scripts/verify-core-flow.mjs` 用 PowerShell 走完海关、收尾、Brief、ADR、Blame，不消耗模型额度；`node scripts/verify-real-agent.mjs codex 170` 驱动真实 Codex，会消耗额度。首次使用 ACP 仍需按对应 Agent 的登录流程完成本机认证，不要求 AEL3 保存 API Key。
 
 历史扫描入口在“记忆 → 历史扫描”：扫描只读本机历史并归一化为 Conversation/Turn/Message，候选提炼不会直接启用长期记忆；须经过质量门和人工审阅后，Skill 才会进入 draft，Failure 才会进入失败库。
 
