@@ -47,7 +47,9 @@ export function Blame() {
       ...report.humanConfirmations.map((e) => ({ ...e, _lane: "human" as const })),
       ...report.guardEvents.map((e) => ({ ...e, _lane: "guard" as const })),
     ];
-    return rows.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    // A human decision is reported both as a decision and as a confirmation; show it once.
+    const seen = new Set<string>();
+    return rows.filter((row) => !seen.has(row.id) && !!seen.add(row.id)).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   }, [report]);
 
   const trace = async () => {
