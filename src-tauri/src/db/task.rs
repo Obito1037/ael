@@ -118,7 +118,6 @@ impl Db {
         self.get_task(id)
     }
 
-    #[cfg(debug_assertions)]
     /// 会话启动后把待开始的任务转为进行中；其他状态是人工决定的，不覆盖。
     pub fn mark_task_started(&self, id: &str) -> AelResult<()> {
         let conn = self.lock();
@@ -129,6 +128,7 @@ impl Db {
         Ok(())
     }
 
+    #[cfg(debug_assertions)]
     pub fn delete_task_for_test(&self, id: &str) -> AelResult<()> {
         let conn = self.lock();
         conn.execute("DELETE FROM tasks WHERE id=?1", params![id])?;
