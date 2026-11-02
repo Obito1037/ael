@@ -20,6 +20,19 @@ fn sample_task() -> NewTask {
 }
 
 #[test]
+fn starting_a_session_only_advances_pending_tasks() {
+    let s = common::temp_state();
+    let t = s.db.create_task(sample_task()).unwrap();
+    s.db.mark_task_started(&t.id).unwrap();
+    assert_eq!(s.db.get_task(&t.id).unwrap().status, TaskStatus::InProgress);
+
+    s.db.update_task_status(&t.id, TaskStatus::Verified)
+        .unwrap();
+    s.db.mark_task_started(&t.id).unwrap();
+    assert_eq!(s.db.get_task(&t.id).unwrap().status, TaskStatus::Verified);
+}
+
+#[test]
 fn task_crud_and_status() {
     let s = common::temp_state();
     let t = s.db.create_task(sample_task()).unwrap();

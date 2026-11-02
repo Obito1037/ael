@@ -88,12 +88,12 @@ test("switching tasks isolates drafts and ignores late evidence and session read
   await openFixture(page, true);
   await page.getByPlaceholder("发生了什么").fill("Alpha unsaved draft");
   await page.getByPlaceholder("补充上下文、原因或证据引用").fill("Alpha draft details");
-  await page.locator("main select").selectOption("error");
+  await page.locator("main label").filter({ hasText: "类型" }).locator("select").selectOption("error");
   await selectTask(page, "Beta");
   await expect(page.getByRole("heading", { name: "Fixture Beta", exact: true })).toBeVisible();
   await expect(page.getByPlaceholder("发生了什么")).toHaveValue("");
   await expect(page.getByPlaceholder("补充上下文、原因或证据引用")).toHaveValue("");
-  await expect(page.locator("main select")).toHaveValue("note");
+  await expect(page.locator("main label").filter({ hasText: "类型" }).locator("select")).toHaveValue("note");
   await expect(page.getByText("Evidence Beta", { exact: true })).toBeVisible();
   await page.getByPlaceholder("发生了什么").fill("New Beta evidence");
   await page.locator("main").getByRole("button", { name: "保存", exact: true })
@@ -105,6 +105,20 @@ test("switching tasks isolates drafts and ignores late evidence and session read
   expect(await page.evaluate(() => (window as any).__taskFixture.appendCalls.map((call: any) => call.taskId))).toEqual(["task-Beta"]);
   await page.locator("main").getByRole("button", { name: "导出 Brief", exact: true }).click();
   expect(await page.evaluate(() => (window as any).__taskFixture.exportCalls)).toEqual(["task-Beta"]);
+});
+
+test("the task status control persists through IPC and updates the list", async ({ page }) => {
+  await openFixture(page);
+  await page.evaluate(async () => {
+    const { ipc } = await import(/* @vite-ignore */ (window as any).__taskModuleURL("/src/lib/ipc.ts"));
+    ipc.updateTaskStatus = async (id: string, status: string) => {
+      (window as any).__statusCalls = [id, status];
+      return { ...(window as any).__taskFixture.tasks.find((item: any) => item.id === id), status };
+    };
+  });
+  await page.getByLabel("任务状态", { exact: true }).selectOption("verified");
+  await expect(page.getByLabel("任务状态", { exact: true })).toHaveValue("verified");
+  expect(await page.evaluate(() => (window as any).__statusCalls)).toEqual(["task-Alpha", "verified"]);
 });
 
 test("filters determine the detail pane and new task opens the single review flow", async ({ page }) => {

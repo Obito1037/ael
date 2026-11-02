@@ -139,8 +139,11 @@ try {
     .then(() => check('verification event', true))
     .catch(error => check('verification event', false, String(error)));
   await invoke('stop_agent_session', { sessionId }).catch(() => {});
+  check('session moved task to in_progress', sql('SELECT status FROM tasks WHERE id=?', taskId)[0][0] === 'in_progress');
+  await invoke('update_task_status', { id: taskId, status: 'verified' });
   const finalize = await invoke('finalize_task', { id: taskId }).catch(error => ({ error: String(error) }));
   check('task finalized', !finalize.error, finalize.error);
+  check('verified task drafted a skill', finalize.draftSkills?.length > 0, finalize.draftSkills?.length);
   const brief = await invoke('compile_brief', { taskId }).catch(error => ({ error: String(error) }));
   check('review brief compiled', !brief.error, brief.error || Object.keys(brief).slice(0, 8));
   const adrs = await invoke('compile_adrs', { taskId }).catch(error => ({ error: String(error) }));

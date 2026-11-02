@@ -59,7 +59,10 @@ pub async fn start_agent_session(
         )?;
         match start.wait_ready().await {
             // 握手期间状态已变；返回最新记录，避免前端用旧的 starting 覆盖 running。
-            Ok(session) => return state.db.get_agent_session(&session.id),
+            Ok(session) => {
+                state.db.mark_task_started(&session.task_id)?;
+                return state.db.get_agent_session(&session.id);
+            }
             // 失败的 ACP 会话连同错误原因留在列表里；auto 模式继续走 PTY。
             Err(reason) if runtime == "acp" => {
                 return Err(AelError::internal(format!("ACP 启动失败: {reason}")));
@@ -77,7 +80,7 @@ pub async fn start_agent_session(
     } else {
         (args, initial_prompt)
     };
-    state.agents.start_session(
+    let session = state.agents.start_session(
         app,
         &state.db,
         StartAgentOptions {
@@ -92,7 +95,9 @@ pub async fn start_agent_session(
             auto_ingest,
             lock_workspace,
         },
-    )
+    )?;
+    state.db.mark_task_started(&session.task_id)?;
+    Ok(session)
 }
 
 /// Codex 的 TUI 启动较慢，写进 PTY 的提示词会在界面就绪前丢失，

@@ -119,6 +119,16 @@ impl Db {
     }
 
     #[cfg(debug_assertions)]
+    /// 会话启动后把待开始的任务转为进行中；其他状态是人工决定的，不覆盖。
+    pub fn mark_task_started(&self, id: &str) -> AelResult<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET status='in_progress', updated_at=?1 WHERE id=?2 AND status='pending'",
+            params![now_iso(), id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_task_for_test(&self, id: &str) -> AelResult<()> {
         let conn = self.lock();
         conn.execute("DELETE FROM tasks WHERE id=?1", params![id])?;

@@ -751,10 +751,11 @@ export const writeAgentConfigTarget = (targetId: string, content: string) => {
 export const backupAgentConfigTarget = (targetId: string) => `~/.ael/backups/config/${targetId}.bak`;
 
 export const finalizeTask = (id: string): FinalizeResult => {
-  const t = updateTaskStatus(id, "verified");
+  // Same rule as engine/finalize.rs: finalizing never changes status, only verified tasks draft a skill.
+  const t = getTask(id);
   return {
     task: t,
-    draftSkills: [SKILLS[0]],
+    draftSkills: t.status === "verified" ? [SKILLS[0]] : [],
     draftFailures: [FAILURES[0]],
     brief: compileBrief(id),
     adrs: listAdrs(id),

@@ -334,6 +334,8 @@ export function Console() {
       if (!mountedRef.current || epoch !== epochRef.current) return;
       const session = await ipc.startAgentSession({ taskId: task.id, profileId: profile.id, cwd: cwd.trim() || task.repoPath || undefined, initialPrompt: profile.kind === "shell" ? undefined : context?.prompt, autoIngest: true, rows: termRef.current?.rows, cols: termRef.current?.cols });
       upsertSession(session);
+      // The backend moves a pending task to in_progress once its session starts.
+      void ipc.getTask(task.id).then((next) => useStore.getState().upsertTask(next)).catch(() => {});
       // ACP handshake can take a minute; selection stays locked meanwhile, so only unmount cancels attaching.
       if (!mountedRef.current) return;
       await attach(session);

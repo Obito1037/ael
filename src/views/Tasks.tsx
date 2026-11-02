@@ -17,6 +17,7 @@ import {
 import { Badge, Button, Chip, Empty, Field, Kicker, Modal, PageTitle, Panel, Spinner, inputCls } from "../ui";
 import type { AgentSession, EventKind, FinalizeResult, Task, TaskEvent, TaskStatus } from "../types";
 
+const TASK_STATUSES: TaskStatus[] = ["pending", "in_progress", "blocked", "verified", "failed", "abandoned"];
 const STATUS_FILTERS: (TaskStatus | "all")[] = ["all", "in_progress", "blocked", "verified", "failed", "pending"];
 const EVENT_KINDS: EventKind[] = ["step", "error", "fix", "verification", "decision", "note"];
 
@@ -221,6 +222,15 @@ function TaskDetail({ task, onFinalized }: { task: Task; onFinalized: (r: Finali
     };
   }, [task.id, refresh, observeFinalize]);
 
+  const changeStatus = async (status: TaskStatus) => {
+    try {
+      useStore.getState().upsertTask(await ipc.updateTaskStatus(task.id, status));
+      if (mountedRef.current) toast(`任务状态已改为${TASK_STATUS_LABEL[status]}。`, "success");
+    } catch {
+      if (mountedRef.current) toast("修改任务状态失败。", "error");
+    }
+  };
+
   const finalize = () => {
     if (finalizingRef.current) return;
     void observeFinalize(finalizeTaskOnce(task.id));
@@ -285,8 +295,11 @@ function TaskDetail({ task, onFinalized }: { task: Task; onFinalized: (r: Finali
           </div>
         )}
 
-        <div className="mt-4 flex flex-wrap gap-2 border-t border-ink/[0.07] pt-4">
-          <Button variant="primary" className="px-3.5 py-1.5 text-[12px]" onClick={finalize} disabled={busy}>
+        <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-ink/[0.07] pt-4">
+          <select aria-label="任务状态" value={task.status} onChange={(event) => void changeStatus(event.target.value as TaskStatus)} disabled={busy} className="rounded-full border border-line bg-panel px-3 py-1.5 text-[12px] text-ink">
+            {TASK_STATUSES.map((status) => <option key={status} value={status}>{TASK_STATUS_LABEL[status]}</option>)}
+          </select>
+          <Button variant="primary" className="px-3.5 py-1.5 text-[12px]" onClick={finalize} disabled={busy} title="只有已验证的任务才会生成经验草案">
             {busy ? <Spinner /> : <Flag className="h-3.5 w-3.5" />} 收尾任务
           </Button>
           <Button variant="ghost" className="px-3.5 py-1.5 text-[12px]" onClick={exportBrief} disabled={exporting}>
